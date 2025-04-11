@@ -21,6 +21,7 @@ import pandas as pd
 # print("ItemSize: " + str(array1.itemsize)) 
 
 #=================================Mean and Std=====================================
+
 data2 = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 array2 = np.array(data2)
 array2 = array2.reshape(3,3)
@@ -30,17 +31,18 @@ for row in range(array2.ndim+1):
     print("Avg:", np.mean(array2[row]),\
         " Std: ", np.std(array2[row]),\
         "\n")
+    
 #=====================================Star=========================================
 
-# for i in [5,3,1]:
-#     print("*"*i + "\n")
+for i in [5,3,1]:
+    print("*"*i + "\n")
 
-# print(11//3)
+print(11//3)
 
-# x=20
-# def func(x):
-#     x=10
-# func(x)
-# print("x is", x)
+x=20
+def func(x):
+    x=10
+func(x)
+print("x is", x)
 
 #=====================================Numpy=========================================

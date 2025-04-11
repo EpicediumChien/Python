@@ -22,21 +22,21 @@ df = DataFrame(np.random.randn(6, 4), index=dates, columns=list("ABCD"))
 
 # print(pd.Series(1, index=list(range(4)), dtype="float32"))
 # print(np.array([3] * 4, dtype="int32"))
-df2 = DataFrame(
-    {
-        "A": 1.0,
-        "B": Timestamp("20130102"),
-        "C": Series(1, index=list(range(4)), dtype="float32"),
-        "D": np.array([3] * 4, dtype="int32"),
-        "E": Categorical(["test", "train", "test", "train"]),
-        "F": "foo"
-        #,["Test"] not equal to length "4" is unacceptable
-    }
-)
+# df2 = DataFrame(
+#     {
+#         "A": 1.0,
+#         "B": Timestamp("20130102"),
+#         "C": Series(1, index=list(range(4)), dtype="float32"),
+#         "D": np.array([3] * 4, dtype="int32"),
+#         "E": Categorical(["test", "train", "test", "train"]),
+#         "F": "foo"
+#         #,["Test"] not equal to length "4" is unacceptable
+#     }
+# )
 # print(df2)
 # print(df2.dtypes)
 
-#Try to get data from internet
+# # Try to get data from internet
 # iris = pd.read_csv("https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv")
 # print(iris.head())
 # print(iris.tail(3))
@@ -52,20 +52,20 @@ df2 = DataFrame(
 
 #========================================== soft_max ==========================================
 
-def soft_max(np_array):
-    exp_array = np.exp(np_array)
-    expTotal = np.sum(exp_array)
-    return exp_array/expTotal
-iris = pd.read_csv("https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv")
-# Apply softmax to the numeric columns of the first 5 rows
-numeric_cols = iris.select_dtypes(include=[np.number]).columns  # Select only numeric columns
+# def soft_max(np_array):
+#     exp_array = np.exp(np_array)
+#     expTotal = np.sum(exp_array)
+#     return exp_array/expTotal
+# iris = pd.read_csv("https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv")
+# # Apply softmax to the numeric columns of the first 5 rows
+# numeric_cols = iris.select_dtypes(include=[np.number]).columns  # Select only numeric columns
 
-# Update DataFrame using correct shape handling
-iris.loc[:4, numeric_cols] = iris.loc[:4, numeric_cols].apply(
-    lambda row: pd.Series(soft_max(row.to_numpy()), index=numeric_cols), axis=1
-)
+# # Update DataFrame using correct shape handling
+# iris.loc[:4, numeric_cols] = iris.loc[:4, numeric_cols].apply(
+#     lambda row: pd.Series(soft_max(row.to_numpy()), index=numeric_cols), axis=1
+# )
 
-print(iris.head())
+# print(iris.head())
 
 #================================== Series Calculation ========================================
 
@@ -76,12 +76,12 @@ print(iris.head())
 # print(Series_obj1 * Series_obj2)
 # print(Series_obj1 * Series_obj3)
 
-#=================================== DataFrame Calculation ====================================
+# =================================== DataFrame Calculation ====================================
 
 # DataFrame_obj1 = DataFrame([[1,3,5,7],[2,4,6,8]], columns=list("ABCD"))
 # DataFrame_obj2 = DataFrame([[1,3],[5,7],[2,4],[6,8]], index=list("ABCD"))
-# # print(DataFrame_obj1)
-# # print(DataFrame_obj2)
+# print(DataFrame_obj1)
+# print(DataFrame_obj2)
 # result = DataFrame_obj1.dot(DataFrame_obj2)
 # print(result)
 
@@ -165,7 +165,107 @@ print(iris.head())
 
 # x=np.array([5,4,3,2,1])
 # y=pow(x,3)
-# plt.title("Course Practice", loc="right")
+# plt.title("Course Practice - Sample", loc="center")
 # plt.axis([1,6,1,150])
-# plt.plot(x,y,label="y = x ** 3")
+# plt.plot(x,y,color='r',label="y = x ** 3")
+# plt.plot(x,[i + 10 for i in y], ':',color='cyan',label="y = x ** 3 + 10")
 # plt.legend()
+# plt.text(2,40,"Test 2, 40 text")
+# plt.xlabel("This is x label")
+# plt.ylabel("This is y label")
+# plt.show()
+
+#==============================Hist practice==================================
+
+# income = [85, 120, 80, 60, 45, 50, 90, 65, 100, 72, 73, 85, 65, 55, 70, 83, 65, 95, 80, 85]
+
+# bins = [30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130]
+
+# plt.hist(income, bins, color='r',label="Test Currency")
+# plt.legend()
+# plt.title("Histogram")
+# plt.xlabel("Income")
+# plt.ylabel("Currency")
+# plt.show()
+
+#==============================Bar practice==================================
+
+# income = [50, 65, 75, 85, 95, 100, 110, 120, 150, 180]
+
+# y = [2.0, 5.5, 12.0, 15.60, 20.8, 15.5, 12.0, 9.4, 5.0, 2.2]
+
+# plt.bar(x=income, height=y, width=5, label="Test People", color='g')
+# plt.legend()
+# plt.title("Bar practice")
+# plt.xlabel("Income")
+# plt.ylabel("Probability(%)")
+# plt.show()
+
+#==============================Pie practice==================================
+
+# income = ['low', 'middle', 'high', 'rich']
+
+# number = [18, 70, 30, 8]
+
+# colors=['r', 'lightblue', 'y', 'pink']
+
+# plt.axis('equal')
+# plt.pie(number , labels=income, colors=colors, shadow=True, explode=(0, 0.2, 0, 0), autopct='%1.1f%%')
+# plt.legend()
+# plt.show()
+
+#=============================Immutable=======================================
+
+"""
+testArray = [1,2,3,4,5,6]
+
+def UpdateIdx(testArray, idxs, target):
+    counter = 0
+    for idx in idxs:
+        testArray[idx] = target[counter]
+        counter+=1
+    testArray = [1, 3]
+    return testArray
+
+UpdateIdx(testArray, [2,3], [11,12])
+
+print(testArray)
+
+Comment testestest
+print("Comment failed")
+"""
+
+"""
+class Animal:
+    def __init__(self):
+        self.__message = "Hey"
+
+class Cat(Animal):
+    def say(self):
+        print(self.__message)
+
+kitty = Cat()
+kitty.say()
+
+a = 7
+b = 11
+c = a - b
+print(c is -4)
+c = c - 1
+print(c is -5)
+c = c - 1
+print(c is -6)
+"""
+"""
+print(all([]))
+print(all([[]]))
+print(all([[[]]]))
+"""
+class Fruit:
+    def __init__(self):
+        print('1')
+class Apple(Fruit):
+    def __init__(self):
+        print('2')
+    
+obj = Apple()

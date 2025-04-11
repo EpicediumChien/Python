@@ -2,6 +2,7 @@ import numpy as np
 import random
 import math
 # A user defined function
+#===========================Define Factorial=================================
 def Factorial(level):
     temp=1
     for i in range(1, level+1):
@@ -10,11 +11,13 @@ def Factorial(level):
 
 # number = eval(input("Please input a factorial number: "))
 # print(Factorial(number))
+#================================Test Power==================================
 
 # number = eval(input("Please input a number: "))
 # power = eval(input("Power val: "))
 # print(pow(number, power))
 
+#======================================================================
 def Exponential(number):
     result, temp = 1, 0
     i = 1
