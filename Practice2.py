@@ -261,11 +261,30 @@ print(all([]))
 print(all([[]]))
 print(all([[[]]]))
 """
-class Fruit:
-    def __init__(self):
-        print('1')
-class Apple(Fruit):
-    def __init__(self):
-        print('2')
+# class Fruit:
+#     def __init__(self):
+#         print('1')
+# class Apple(Fruit):
+#     def __init__(self):
+#         print('2')
     
-obj = Apple()
+# obj = Apple()
+
+import numpy as np
+from scipy.special import expit  # numerically stable sigmoidfrom scipy.special import expit  # numerically stable sigmoid
+
+# a = np.array([1,0.85,0.05])
+# b = np.array([[2.73, 3.51], [-6.37, 7.89], [6.60, -7.92]])
+
+# Generate a random (1, 100) array
+a = np.random.rand(1, 100000)
+
+# Generate a random (100, 2) array
+b = np.random.rand(100000, 2)
+
+result = np.dot(a, b)
+
+# Apply stable sigmoid
+sigmoid_result = expit(result)
+
+print(sigmoid_result)
