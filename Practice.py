@@ -37,3 +37,26 @@ def exponential_function(x):
 # Example usage
 result = exponential_function(1)  # Computes e^2
 print(f"e^1 = {result}")
+
+class Solution:
+    def maxArea(self, height: List[int]) -> int:
+        head = 0
+        tail = len(height) - 1
+        max_result = 0
+
+        while head < tail:
+            # Calculate the current area
+            current_height = min(height[head], height[tail])
+            current_width = tail - head
+            current_area = current_height * current_width
+
+            # Update max_result if the current area is larger
+            max_result = max(max_result, current_area)
+
+            # Move the pointer of the shorter line inwards
+            if height[head] < height[tail]:
+                head += 1
+            else:
+                tail -= 1
+
+        return max_result

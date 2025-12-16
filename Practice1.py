@@ -22,27 +22,30 @@ import pandas as pd
 
 #=================================Mean and Std=====================================
 
-data2 = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-array2 = np.array(data2)
-array2 = array2.reshape(3,3)
-print(array2)
+# data2 = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+# array2 = np.array(data2)
+# array2 = array2.reshape(3,3)
+# print(array2)
 
-for row in range(array2.ndim+1):
-    print("Avg:", np.mean(array2[row]),\
-        " Std: ", np.std(array2[row]),\
-        "\n")
+# for row in range(array2.ndim+1):
+#     print("Avg:", np.mean(array2[row]),\
+#         " Std: ", np.std(array2[row]),\
+#         "\n")
     
 #=====================================Star=========================================
-
-for i in [5,3,1]:
+n = int(input())
+cap = 2*n-1
+arr = list(range(cap,-1,-2))
+for i in arr:
     print("*"*i + "\n")
 
-print(11//3)
+print(arr)
+# print(11//3)
 
-x=20
-def func(x):
-    x=10
-func(x)
-print("x is", x)
+# x=20
+# def func(x):
+#     x=10
+# func(x)
+# print("x is", x)
 
 #=====================================Numpy=========================================

@@ -1,0 +1,9 @@
+chromedriver.exe
+captcha_char_model_0.pth
+captcha_char_model_1.pth
+captcha_char_model_2.pth
+captcha_char_model_3.pth
+captcha_char_transformer_model_0.pth
+captcha_char_transformer_model_1.pth
+captcha_char_transformer_model_2.pth
+captcha_char_transformer_model_3.pth
