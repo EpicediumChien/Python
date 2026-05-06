@@ -3,7 +3,7 @@ import m2cgen as m2c
 import os
 
 # 1. Load your stable Random Forest model
-model_path = 'models/breathing_rf_stable.pkl'
+model_path = 'models/robust_breathing_model.pkl'
 if not os.path.exists(model_path):
     print(f"Error: {model_path} not found!")
 else:

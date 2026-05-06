@@ -1,57 +1,51 @@
-import pandas as pd
-import numpy as np
 import os
+import glob
 
-# --- PATHS ---
-script_dir = os.path.dirname(os.path.abspath(__file__))
-# Check the exact path string again
-dyspnea_path = os.path.join(script_dir, 'TrainingData', 'Static Sit', 'imu_log_20251210_223046.csv')
+# Paths
+SOURCE_DIR = r"C:/Git/Python/IMU/data/Time Example"
+OUTPUT_DIR = os.path.join(SOURCE_DIR, "fixed_data")
 
-print("--- DIAGNOSTIC REPORT ---")
-print(f"Looking for file at:\n{dyspnea_path}\n")
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
 
-if os.path.exists(dyspnea_path):
-    print("✅ File FOUND.")
+files = glob.glob(os.path.join(SOURCE_DIR, "*.csv"))
+
+print(f"Brute-force cleaning {len(files)} files...")
+
+for f in files:
+    filename = os.path.basename(f)
+    output_path = os.path.join(OUTPUT_DIR, filename)
     
     try:
-        df = pd.read_csv(dyspnea_path)
-        print(f"✅ CSV Read successfully. Rows: {len(df)}")
-        print(f"   Columns found: {list(df.columns)}")
-        
-        # Check 1: Column Names
-        if 'accZ' not in df.columns:
-            print("❌ ERROR: Column 'accZ' missing. Check if it's named 'AccZ' or similar.")
-        else:
-            print("✅ Column 'accZ' exists.")
+        with open(f, 'r') as file:
+            lines = file.readlines()
+
+        fixed_lines = []
+        for i, line in enumerate(lines):
+            parts = line.strip().split(',')
             
-            # Check 2: Sampling Rate & Duration
-            if 'timestamp' in df.columns:
-                avg_diff = df['timestamp'].diff().mean()
-                fs = 1000.0 / avg_diff if avg_diff > 0 else 50.0
-                duration = len(df) / fs
-                
-                print(f"   Calculated FS: {fs:.2f} Hz")
-                print(f"   Total Duration: {duration:.2f} seconds")
-                
-                # Check 3: Logic Requirements
-                REQUIRED_OFFSET = 10.0
-                REQUIRED_PLOT = 15.0
-                TOTAL_NEEDED = REQUIRED_OFFSET + REQUIRED_PLOT
-                
-                print(f"\n--- LOGIC CHECK ---")
-                print(f"Code needs: {TOTAL_NEEDED} seconds ({REQUIRED_OFFSET}s offset + {REQUIRED_PLOT}s plot)")
-                
-                if duration < TOTAL_NEEDED:
-                    print(f"❌ FAILURE: File is too short! ({duration:.2f}s < {TOTAL_NEEDED}s)")
-                    print("   -> Solution: Decrease OFFSET_DYSPNEA to 0.0 or record a longer file.")
-                else:
-                    print("✅ SUCCESS: File is long enough.")
+            # Check if this is the header row or a data row
+            if i == 0:
+                # Keep the header as is (it's already 14 columns)
+                fixed_lines.append(line)
             else:
-                print("❌ ERROR: 'timestamp' column missing.")
-                
+                # In the data row, check if parts[1] and parts[2] are the same
+                # If they are, we delete parts[2]
+                if len(parts) > 2 and parts[1] == parts[2]:
+                    # Remove the element at index 2
+                    del parts[2]
+                    fixed_lines.append(",".join(parts) + "\n")
+                else:
+                    # If not a duplicate, just keep it
+                    fixed_lines.append(line)
+
+        # Write the fixed file
+        with open(output_path, 'w') as out_file:
+            out_file.writelines(fixed_lines)
+            
+        print(f"Successfully fixed: {filename}")
+
     except Exception as e:
-        print(f"❌ CRITICAL ERROR reading CSV: {e}")
-else:
-    print("❌ FILE NOT FOUND.")
-    print("   -> Check if 'TrainingData' or 'Static Sit' folder names have spaces or typos.")
-    print(f"   -> Your script is running from: {script_dir}")
+        print(f"Failed to fix {filename}: {e}")
+
+print(f"\nCleanup complete. Check the 'fixed_data' folder.")

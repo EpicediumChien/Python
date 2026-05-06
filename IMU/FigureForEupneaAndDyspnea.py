@@ -2,144 +2,117 @@ import os
 import glob
 import pandas as pd
 import numpy as np
-import joblib
-from scipy import signal, fft, interpolate, stats
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, precision_score
-from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from scipy import signal
 
 # ==========================================
 # 1. Configuration
 # ==========================================
-DATA_DIR = os.path.join('TrainingData', 'Static Sit') 
-TARGET_FREQ = 25        
-WINDOW_SIZE = 250   
-STEP_SIZE = 50 # Maximum overlap for the largest possible dataset
+DATA_DIR = os.path.join('data', 'StrawCompare')
+# DATA_DIR = os.path.join('data', 'MAE')
+FILE_PATTERN = "*.csv"
+FS = 20  
 
-# ==========================================
-# 2. Advanced Feature Engineering
-# ==========================================
+def apply_agc(sig, window_size=FS*4):
+    rolling_std = pd.Series(sig).rolling(window=int(window_size), center=True).std()
+    rolling_std = rolling_std.bfill().ffill().replace(0, 1e-6)
+    return sig / rolling_std
 
-def get_invariant_signals(df_window):
-    signals = []
-    # Acc/Gyro Magnitude & PCA
-    for prefix in ['acc', 'gyro']:
-        cols = [f'{prefix}X', f'{prefix}Y', f'{prefix}Z']
-        arr = df_window[cols].values
-        signals.append(np.linalg.norm(arr, axis=1)) # Magnitude
-        pca = PCA(n_components=1)
-        signals.append(pca.fit_transform(arr).flatten()) # Principal Axis
+def process_yahboom_file(file_path):
+    # Load data
+    df = pd.read_csv(file_path)
     
-    # Orientation Change
-    angles = df_window[['roll', 'pitch', 'yaw']].values
-    diff_angles = np.diff(angles, axis=0, append=angles[-1:])
-    signals.append(np.linalg.norm(diff_angles, axis=1))
-    return signals
+    # --- CRITICAL FIX: Time Calculation ---
+    # Use UnixTimestamp (ms) for duration calculation to avoid string parsing errors
+    # Based on your sample, UnixTimestamp is in milliseconds
+    start_time_ms = df['UnixTimestamp'].iloc[0]
+    end_time_ms = df['UnixTimestamp'].iloc[-1]
+    duration_sec = (end_time_ms - start_time_ms) / 1000.0
+    
+    # 1. Convert Unix Timestamp (ms) to UTC
+    # 2. Add 8 hours (+8) to match Taiwan/Local time
+    df['DateTime'] = pd.to_datetime(df['UnixTimestamp'], unit='ms') + pd.to_timedelta(8, unit='h')
+    
+    # --- FIX 1: Correct Column Alignment ---
+    # Try to get AccX, AccY, AccZ by name first.
+    # If KeyError (e.g., due to column shift in the CSV as noted previously with duplicate UnixTimestamp),
+    # fall back to iloc based on the observed shifted structure in your sample data.
+    try:
+        raw_sig = np.linalg.norm(df[['AccX', 'AccY', 'AccZ']].values, axis=1)
+    except KeyError:
+        print(f"Warning: Columns 'AccX', 'AccY', 'AccZ' not found directly. Attempting iloc for {file_path}")
+        # Assuming the structure is: DateTime, UnixTimestamp, UnixTimestamp (dup), AccX, AccY, AccZ
+        # So AccX would be at index 3 (0-indexed).
+        raw_sig = np.linalg.norm(df.iloc[:, [3, 4, 5]].values, axis=1)
 
-def extract_features(signals, fs=25):
-    all_feats = []
-    for sig in signals:
-        # Tighter Bandpass to remove more noise (0.12Hz - 0.75Hz)
-        nyq = 0.5 * fs
-        b, a = signal.butter(3, [0.12/nyq, 0.75/nyq], btype='band')
-        try: sig_filt = signal.filtfilt(b, a, sig)
-        except: sig_filt = sig
-        
-        sig_norm = (sig_filt - np.mean(sig_filt)) / (np.std(sig_filt) + 1e-6)
-        
-        # --- Time Domain (Shape & Complexity) ---
-        all_feats.append(np.std(sig_norm))
-        all_feats.append(stats.skew(sig_norm))
-        all_feats.append(stats.kurtosis(sig_norm))
-        
-        # Crest Factor (Peak-to-RMS ratio - helps find "sharp" gasping)
-        crest_factor = np.max(np.abs(sig_norm)) / np.sqrt(np.mean(sig_norm**2))
-        all_feats.append(crest_factor)
-        
-        # Autocorrelation Peak (Rhythm Stability)
-        ac = np.correlate(sig_norm, sig_norm, mode='full')[len(sig_norm)-1:]
-        ac_peak = np.max(ac[20:]) / (ac[0] + 1e-6)
-        all_feats.append(ac_peak)
-        
-        # --- Frequency Domain ---
-        freqs, psd = signal.welch(sig_norm, fs, nperseg=WINDOW_SIZE)
-        psd_norm = psd / (np.sum(psd) + 1e-12)
-        
-        all_feats.append(freqs[np.argmax(psd)]) # Peak Freq
-        # Spectral Entropy (High entropy = noise, Low = pure breath)
-        se = -np.sum(psd_norm * np.log2(psd_norm + 1e-12))
-        all_feats.append(se)
-        
-    return np.array(all_feats)
+    # ==========================================
+    # 2. Universal Balanced Processing (10 - 50 BPM)
+    # ==========================================
+    nyq = 0.5 * FS
+    
+    # FILTER: [0.08Hz (4.8 BPM) to 0.85Hz (51 BPM)]
+    # This covers your entire range safely.
+    b, a = signal.butter(2, [0.08/nyq, 0.85/nyq], btype='band')
+    sig_filt = signal.filtfilt(b, a, raw_sig)
 
-def time_warp_df(df, factor):
-    x = np.arange(len(df))
-    x_new = np.linspace(0, (len(df)-1) * factor, len(df))
-    # Use cubic interpolation for smoother "synthetic" waves
-    return pd.DataFrame({col: interpolate.interp1d(x, df[col].values, kind='cubic', fill_value="extrapolate")(x_new) for col in df.columns})
+    # AGC: 10-second window to stabilize the slow 10 BPM signal.
+    sig_agc = apply_agc(sig_filt, window_size=FS * 10) 
 
-# ==========================================
-# 3. Buffer-Zone Training Strategy
-# ==========================================
+    # SMOOTHING: 11 samples (1.1s)
+    # This is the "Goldilocks" value. It's smooth enough to hide 
+    # the wiggles in 10 BPM, but sharp enough for 46 BPM.
+    sig_smooth = signal.savgol_filter(sig_agc, window_length=11, polyorder=2)
+
+    # PEAK DETECTION:
+    # distance=10 (1.0s): Fast enough to catch 46 BPM (1.3s period).
+    # prominence=1.5: THE CRITICAL FIX. 
+    # This ignores all those small red dots you see in your "Worse" image.
+    peaks, _ = signal.find_peaks(sig_smooth, distance=10, prominence=1.5)
+    
+    # --- BPM Calculation ---
+    if duration_sec > 5:
+        bpm = (len(peaks) / duration_sec) * 60
+    else:
+        bpm = 0
+
+    # ==========================================
+    # 4. Status Logic (12-20 BPM)
+    # ==========================================
+    if 12 <= bpm <= 20:
+        status_text = "NORMAL"
+        status_color = "green"
+    else:
+        status_text = "ABNORMAL"
+        status_color = "red"
+
+    # ==========================================
+    # 6. Visualization
+    # ==========================================
+    plt.figure(figsize=(16, 7))
+    
+    plt.plot(df['DateTime'], sig_smooth, label='Processed Respiration (AGC)', color='#2980b9', lw=2)
+    plt.scatter(df['DateTime'].iloc[peaks], sig_smooth[peaks], color='red', s=80, 
+                label=f'Breaths Detected: {len(peaks)}', zorder=5)
+
+    ax = plt.gca()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.xticks(rotation=30)
+    
+    plt.title(f"YAHBOOM IMU ANALYSIS: {os.path.basename(file_path)}\n"
+              f"Rate: {bpm:.2f} BPM | STATUS: {status_text}", 
+              fontsize=14, fontweight='bold', color=status_color)
+    
+    plt.xlabel("Clock Time (HH:MM:SS)")
+    plt.ylabel("Normalized Amplitude")
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
 if __name__ == "__main__":
-    all_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
-    X_list, Y_list = [], []
-
-    print("Generating Training Set with BUFFER ZONE (19-24 BPM removed from training)...")
-
-    for f in all_files:
-        df_raw = pd.read_csv(f)[['accX', 'accY', 'accZ', 'gyroX', 'gyroY', 'gyroZ', 'roll', 'pitch', 'yaw']]
-        
-        for i in range(0, len(df_raw) - WINDOW_SIZE, STEP_SIZE):
-            window = df_raw.iloc[i : i + WINDOW_SIZE]
-            
-            # --- 1. STRICT NORMAL (12-18 BPM) ---
-            # Original
-            X_list.append(extract_features(get_invariant_signals(window)))
-            Y_list.append(0)
-            # Safe Normal (Random 13-17 BPM)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, np.random.uniform(0.85, 1.1)))))
-            Y_list.append(0)
-
-            # --- 2. CLEAR ABNORMAL (<10 or >25 BPM) ---
-            # We skip the 19-24 range to teach the model "Clear Differences"
-            # Very Slow (6-10 BPM)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, np.random.uniform(0.4, 0.65)))))
-            Y_list.append(1)
-            # Very Fast (25-38 BPM)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, np.random.uniform(1.7, 2.5)))))
-            Y_list.append(1)
-
-    X = np.nan_to_num(np.array(X_list))
-    Y = np.array(Y_list)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.15, stratify=Y, random_state=42)
-    
-    print(f"Training on {len(X_train)} samples...")
-
-    model = RandomForestClassifier(
-        n_estimators=500,
-        max_depth=25,
-        min_samples_leaf=1,
-        max_features='log2', # Uses fewer features per split to force learning subtle patterns
-        class_weight='balanced',
-        random_state=42,
-        n_jobs=-1
-    )
-    model.fit(X_train, y_train)
-    
-    y_pred = model.predict(X_test)
-    y_probs = model.predict_proba(X_test)[:, 1]
-    
-    print("\n=== Buffer-Zone Performance Report ===")
-    print(classification_report(y_test, y_pred, target_names=['Normal', 'Abnormal']))
-
-    print("\nStrict Precision Check (Goal: 100%):")
-    for thresh in [0.5, 0.8, 0.9]:
-        mask = (y_probs >= thresh) | (y_probs <= (1-thresh))
-        y_strict = (y_probs[mask] >= thresh).astype(int)
-        prec = precision_score(y_test[mask], y_strict, pos_label=1, zero_division=0)
-        print(f"Confidence > {thresh:.1f} | Abnormal Precision: {prec:.4f}")
-
-    joblib.dump(model, 'models/robust_breathing_model.pkl')
+    files = glob.glob(os.path.join(DATA_DIR, FILE_PATTERN))
+    for f in sorted(files):
+        process_yahboom_file(f)

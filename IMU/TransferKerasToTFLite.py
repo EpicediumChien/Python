@@ -6,86 +6,67 @@ import numpy as np
 # ==========================================
 # Settings
 # ==========================================
-keras_path = 'models/breathing_transformer_model.keras'
-scaler_path = 'models/scaler.pkl'
-output_tflite = 'respiration_model.tflite'
+# keras_path = 'models/respiration_classifier.keras'
+keras_path = 'models/movement_classifier.keras'
+# scaler_path = 'models/scaler.pkl'
+scaler_path = 'models/movement_scaler.pkl'
+# output_tflite = 'respiration_model.tflite'
+output_tflite = 'movement_model.tflite'
 
-# Must match your training config
-WINDOW_SIZE = 150 
-FEATURE_COUNT = 11  # (accX,Y,Z, gyroX,Y,Z, roll,pitch,yaw, accMag, gyroMag)
-
-print("--- Step 1: Checking Files ---")
-if os.path.exists(keras_path):
-    print(f"✅ Found Keras model at {keras_path}")
-else:
+print("--- Step 1: Loading Model ---")
+if not os.path.exists(keras_path):
     print(f"❌ Error: Cannot find {keras_path}")
     exit()
 
-print("\n--- Step 2: Loading Model ---")
-try:
-    model = tf.keras.models.load_model(keras_path)
-    print("✅ Model loaded into memory")
-except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    exit()
+model = tf.keras.models.load_model(keras_path)
 
-print("\n--- Step 3: Converting to TFLite (Fixed for LSTM) ---")
+# --- AUTO-DETECT SHAPES ---
+# model.input_shape returns something like (None, 150, 11)
+input_shape = model.layers[0].input_shape
+if isinstance(input_shape, list): input_shape = input_shape[0]
+
+# Extract the window size and feature count from the model itself
+detected_window = input_shape[1]
+detected_features = input_shape[2]
+
+print(f"✅ Model Loaded. Detected Input Requirement: Window={detected_window}, Features={detected_features}")
+
+print("\n--- Step 2: Converting to TFLite ---")
 try:
-    # 1. Convert using a Concrete Function to enforce Static Shapes
-    #    We force the batch size to be '1' because on Android you classify one window at a time.
+    # We use the detected shapes to ensure compatibility
     run_model = tf.function(lambda x: model(x))
     
-    # Define the specific input signature: (Batch=1, Time=150, Features=11)
     concrete_func = run_model.get_concrete_function(
-        tf.TensorSpec([1, WINDOW_SIZE, FEATURE_COUNT], model.inputs[0].dtype)
+        tf.TensorSpec([1, detected_window, detected_features], model.inputs[0].dtype)
     )
 
     converter = tf.lite.TFLiteConverter.from_concrete_functions([concrete_func])
 
-    # 2. Enable "Select TF Ops" 
-    #    This allows TFLite to fall back to standard TF operations if a specific TFLite op is missing.
+    # Enable support for LSTM/Complex ops
     converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS, # Standard TFLite ops
-        tf.lite.OpsSet.SELECT_TF_OPS    # Extended TF ops (needed for some LSTM implementations)
+        tf.lite.OpsSet.TFLITE_BUILTINS, 
+        tf.lite.OpsSet.SELECT_TF_OPS    
     ]
-
-    # 3. Fix for the "TensorListReserve" error
     converter._experimental_lower_tensor_list_ops = False
-    
-    # 4. Standard Optimization
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
 
     tflite_model = converter.convert()
-    print("✅ Conversion successful")
-
-except Exception as e:
-    print(f"❌ Error during conversion: {e}")
-    # Print detailed help if it fails again
-    print("\n--- Troubleshooting Tip ---")
-    print("If this still fails, your TF version might be too old or too new.")
-    print("Try: pip install tensorflow==2.15.0 (or similar stable version)")
-    exit()
-
-print("\n--- Step 4: Saving File ---")
-try:
+    
     with open(output_tflite, 'wb') as f:
         f.write(tflite_model)
-    print(f"✅ SUCCESS! File saved as: {os.path.abspath(output_tflite)}")
-except Exception as e:
-    print(f"❌ Error saving file: {e}")
+    print(f"✅ SUCCESS! TFLite saved as: {output_tflite}")
 
-print("\n--- Step 5: Extracting Scaler Values ---")
-try:
-    scaler = joblib.load(scaler_path)
-    if hasattr(scaler, 'mean_'):
-        print(f"\nIMPORTANT: Copy these to Android ViewModel:")
-        # Convert to list for easy copy-pasting
-        means = scaler.mean_.tolist()
-        scales = scaler.scale_.tolist()
-        
-        print(f"val MEANS = floatArrayOf({', '.join([f'{x:.6f}f' for x in means])})")
-        print(f"val STDS  = floatArrayOf({', '.join([f'{x:.6f}f' for x in scales])})")
-    else:
-        print("Scaler found but format is unknown.")
 except Exception as e:
-    print(f"❌ Could not read scaler.pkl: {e}")
+    print(f"❌ Conversion failed: {e}")
+    exit()
+
+print("\n--- Step 3: Extracting Scaler for Kotlin ---")
+if os.path.exists(scaler_path):
+    scaler = joblib.load(scaler_path)
+    means = scaler.mean_.tolist()
+    stds = scaler.scale_.tolist()
+
+    print(f"private val SCALER_MEANS = floatArrayOf({', '.join([f'{x:.6f}f' for x in means])})")
+    print(f"private val SCALER_STDS  = floatArrayOf({', '.join([f'{x:.6f}f' for x in stds])})")
+else:
+    print("⚠️ Scaler.pkl not found. You will need to extract means/stds manually.")

@@ -6,104 +6,104 @@ import joblib
 from scipy import signal, fft, interpolate, stats
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, precision_score
+from sklearn.metrics import classification_report, accuracy_score
 from sklearn.decomposition import PCA
 
 # ==========================================
-# 1. Configuration (Matching your first code)
+# 1. Configuration
 # ==========================================
 DATA_DIR = os.path.join('TrainingData', 'Static Sit') 
 TARGET_FREQ = 25        
 WINDOW_SIZE = 250   
-STEP_SIZE = 60 
+STEP_SIZE = 40 # Maximum density for training data
 
 # ==========================================
-# 2. The ORIGINAL Pre-Processing Logic
+# 2. Advanced Feature Extraction
 # ==========================================
 
 def clean_signal_original_logic(data, fs=25):
-    """ The exact logic from your FigureForEupneaAndDyspnea.py """
     nyq = 0.5 * fs
     low, high = 0.1 / nyq, 0.8 / nyq 
     b, a = signal.butter(2, [low, high], btype='band')
-    
-    # Median filter (去除突波)
-    kernel = 5 # fs * 0.2
-    
-    # Pre-process
-    feat = signal.medfilt(data, kernel_size=kernel)
-    try:
-        cleaned_data = signal.filtfilt(b, a, feat)
-    except:
-        cleaned_data = feat
+    feat = signal.medfilt(data, kernel_size=5)
+    try: cleaned_data = signal.filtfilt(b, a, feat)
+    except: cleaned_data = feat
     return cleaned_data
 
 def get_invariant_signals(df_window):
-    """ Extracts signals that don't change when the IMU is rotated """
     signals = []
-    # 1. Acc Magnitude
-    acc = df_window[['accX', 'accY', 'accZ']].values
-    signals.append(np.linalg.norm(acc, axis=1))
+    # Acc/Gyro Magnitude & PCA
+    for prefix in ['acc', 'gyro']:
+        arr = df_window[[f'{prefix}X', f'{prefix}Y', f'{prefix}Z']].values
+        signals.append(np.linalg.norm(arr, axis=1)) # Magnitude
+        signals.append(PCA(n_components=1).fit_transform(arr).flatten()) # Principal Axis
     
-    # 2. Acc PCA (The main axis of chest expansion)
-    pca = PCA(n_components=1)
-    signals.append(pca.fit_transform(acc).flatten())
-    
-    # 3. Gyro Magnitude
-    gyro = df_window[['gyroX', 'gyroY', 'gyroZ']].values
-    signals.append(np.linalg.norm(gyro, axis=1))
-
-    # 4. Orientation Change (Magnitude of R/P/Y tilt)
+    # Orientation Change
     angles = df_window[['roll', 'pitch', 'yaw']].values
     diff_angles = np.diff(angles, axis=0, append=angles[-1:])
     signals.append(np.linalg.norm(diff_angles, axis=1))
-    
     return signals
 
 def extract_features(signals, fs=25):
     all_feats = []
+    
+    # Feature 1: Cross-Correlation between Acc and Gyro Magnitude (Synchronization)
+    acc_mag = signals[0]
+    gyro_mag = signals[2]
+    corr = np.corrcoef(acc_mag, gyro_mag)[0, 1]
+    all_feats.append(corr if not np.isnan(corr) else 0)
+
     for sig in signals:
-        # Step A: Apply YOUR original cleaning logic
         sig_cleaned = clean_signal_original_logic(sig, fs=fs)
-        
-        # Step B: Standardize (AGC logic)
         sig_norm = (sig_cleaned - np.mean(sig_cleaned)) / (np.std(sig_cleaned) + 1e-6)
         
-        # --- Time Domain ---
-        all_feats.append(np.std(sig_norm))
-        all_feats.append(stats.skew(sig_norm))
-        all_feats.append(stats.kurtosis(sig_norm))
+        # --- Time Domain Shape ---
+        all_feats.extend([np.std(sig_norm), stats.skew(sig_norm), stats.kurtosis(sig_norm)])
         
-        # --- [CRITICAL] Frequency Domain with Hanning Window ---
-        # A Hanning window prevents edge noise from creating fake frequency peaks
-        win = signal.windows.hann(len(sig_norm))
-        sig_win = sig_norm * win
+        # --- Hilbert Envelope Stability ---
+        analytic_signal = signal.hilbert(sig_norm)
+        amplitude_envelope = np.abs(analytic_signal)
+        envelope_stability = np.std(amplitude_envelope) / (np.mean(amplitude_envelope) + 1e-6)
+        all_feats.append(envelope_stability)
         
-        freqs, psd = signal.welch(sig_win, fs, nperseg=len(sig_norm))
-        peak_freq = freqs[np.argmax(psd)]
-        all_feats.append(peak_freq) # The 0.25Hz vs 0.5Hz feature
-        all_feats.append(np.sum(psd))
+        # --- Frequency Domain (Sub-band analysis) ---
+        freqs, psd = signal.welch(sig_norm, fs, nperseg=125, noverlap=62, nfft=1024)
         
-        # Rhythm Strength (Autocorrelation)
+        # Peak Freq
+        peak_idx = np.argmax(psd)
+        all_feats.append(freqs[peak_idx])
+        
+        # Energy Ratio: Normal (0.1-0.35Hz) vs Abnormal (0.35-0.8Hz)
+        e_normal = np.sum(psd[(freqs >= 0.1) & (freqs <= 0.35)])
+        e_abnormal = np.sum(psd[(freqs > 0.35) & (freqs <= 0.8)])
+        all_feats.append(e_normal / (e_abnormal + 1e-12))
+        
+        # Spectral Flatness & Autocorrelation
+        spec_flatness = stats.gmean(psd + 1e-12) / (np.mean(psd) + 1e-12)
         ac = np.correlate(sig_norm, sig_norm, mode='full')[len(sig_norm)-1:]
-        all_feats.append(np.max(ac[20:]) / (ac[0] + 1e-6))
+        ac_peak = np.max(ac[30:150]) / (ac[0] + 1e-6)
+        
+        all_feats.extend([spec_flatness, ac_peak])
         
     return np.array(all_feats)
 
 def time_warp_df(df, factor):
-    """ Smooth interpolation for synthetic BPMs """
     x = np.arange(len(df))
     x_new = np.linspace(0, (len(df)-1) * factor, len(df))
-    return pd.DataFrame({col: interpolate.interp1d(x, df[col].values, kind='cubic', fill_value="extrapolate")(x_new) for col in df.columns})
+    warped = pd.DataFrame({col: interpolate.interp1d(x, df[col].values, kind='cubic', fill_value="extrapolate")(x_new) for col in df.columns})
+    
+    # Inject 1% Synthetic Noise to prevent "perfect signal" bias
+    noise = np.random.normal(0, 0.01, warped.shape)
+    return warped + noise
 
 # ==========================================
-# 3. Training Execution
+# 3. Execution (Massive Augmentation)
 # ==========================================
 if __name__ == "__main__":
     all_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
     X_list, Y_list = [], []
 
-    print(f"Applying Original Pre-processing to {len(all_files)} files...")
+    print("Generating Multi-Domain Fusion dataset...")
 
     for f in all_files:
         df_raw = pd.read_csv(f)[['accX', 'accY', 'accZ', 'gyroX', 'gyroY', 'gyroZ', 'roll', 'pitch', 'yaw']]
@@ -111,37 +111,47 @@ if __name__ == "__main__":
         for i in range(0, len(df_raw) - WINDOW_SIZE, STEP_SIZE):
             window = df_raw.iloc[i : i + WINDOW_SIZE]
             
-            # --- BALANCE 1:1 ---
-            # Normal (12-18 BPM)
-            X_list.append(extract_features(get_invariant_signals(window)))
+            # --- NORMAL (3 Variations) ---
+            X_list.append(extract_features(get_invariant_signals(window))) # Original
             Y_list.append(0)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 1.15)))) # 17 BPM
+            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 0.85)))) # 12.75 BPM
+            Y_list.append(0)
+            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 1.2)))) # 18 BPM
             Y_list.append(0)
 
-            # Abnormal (Clear Slow / Clear Fast)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 0.5)))) # 7.5 BPM
+            # --- ABNORMAL (3 Variations) ---
+            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 0.5))))  # 7.5 BPM
             Y_list.append(1)
-            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 1.8)))) # 27 BPM
+            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 1.8))))  # 27 BPM
+            Y_list.append(1)
+            X_list.append(extract_features(get_invariant_signals(time_warp_df(window, 2.5))))  # 37.5 BPM
             Y_list.append(1)
 
     X = np.nan_to_num(np.array(X_list))
     Y = np.array(Y_list)
     
-    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, stratify=Y, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.15, stratify=Y, random_state=42)
     
-    # Higher quality forest
-    model = RandomForestClassifier(n_estimators=500, max_depth=20, class_weight='balanced', random_state=42, n_jobs=-1)
+    # Using XGBoost-style depth for Random Forest
+    model = RandomForestClassifier(
+        n_estimators=100, 
+        max_depth=15, 
+        max_features='sqrt',
+        min_samples_leaf=1,
+        bootstrap=True,
+        class_weight='balanced', 
+        random_state=42, 
+        n_jobs=-1
+    )
     model.fit(X_train, y_train)
     
     y_pred = model.predict(X_test)
-    print("\n=== PERFORMANCE REPORT (STRICT PRE-PROCESS) ===")
-    print(classification_report(y_test, y_pred, target_names=['Normal', 'Abnormal']))
+    print("\n=== VERSION 12: MULTI-DOMAIN FUSION RESULTS ===")
+    print(classification_report(y_test, y_pred, digits=4))
+    print(f"Final Accuracy: {accuracy_score(y_test, y_pred):.4f}")
 
-    # Check Precision
-    y_probs = model.predict_proba(X_test)[:, 1]
-    for thresh in [0.5, 0.8]:
-        mask = (y_probs >= thresh) | (y_probs <= (1-thresh))
-        prec = precision_score(y_test[mask], (y_probs[mask] >= thresh).astype(int), pos_label=1)
-        print(f"Confidence > {thresh:.1f} | Abnormal Precision: {prec:.4f}")
+    # Top Feature Importance Check
+    importances = model.feature_importances_
+    print(f"Total Features used: {len(importances)}")
 
     joblib.dump(model, 'models/robust_breathing_model.pkl')
