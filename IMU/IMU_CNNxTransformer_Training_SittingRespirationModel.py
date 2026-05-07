@@ -42,7 +42,7 @@ def clean_signal_logic(data, fs=20):
     b, a = signal.butter(2, [0.08/nyq, 0.85/nyq], btype='band')
     
     # 2. 你的原始平滑視窗 (1.1s)
-    savgol_win = 27 # 25Hz * 1.1s ≈ 27
+    savgol_win = 15 # 20Hz 下，Savgol 建議用 11 或 15 (約 0.5~0.7s)
     
     for i in range(data.shape[1]):
         # A. 帶通濾波
@@ -104,41 +104,35 @@ def clean_signal_logic(data, fs=20):
 
 def build_hybrid_model(input_shape):
     inputs = layers.Input(shape=input_shape)
-    
-    # 1. Add Noise (The runner on sand) - CRUCIAL
-    x = GaussianNoise(0.01)(inputs)
+    x = GaussianNoise(0.02)(inputs)
 
-    # 2. CNN Block - Add L2 Regularization
+    # 第一層 CNN 捕捉基礎特徵
     x = layers.Conv1D(64, kernel_size=7, padding="same", activation="relu", kernel_regularizer=l2(0.01))(x)
     x = layers.BatchNormalization()(x)
-    x = layers.SpatialDropout1D(0.2)(x)
     x = layers.MaxPooling1D(pool_size=2)(x) # 200 -> 100
 
+    # 第二層 CNN 增加通道數
     x = layers.Conv1D(128, kernel_size=5, padding="same", activation="relu", kernel_regularizer=l2(0.01))(x)
     x = layers.BatchNormalization()(x)
     x = layers.MaxPooling1D(pool_size=2)(x) # 100 -> 50
     
-    # 3. Transformer Block - Simplify it
+    # 增強後的 Transformer
     x = PositionalEmbedding(50, 128)(x) 
-    # Use smaller head_size to prevent over-memorization
-    x = transformer_encoder(x, head_size=32, num_heads=2, ff_dim=64, dropout=0.5)
+    # 增加 head 數量到 4 或 8
+    x = transformer_encoder(x, head_size=64, num_heads=2, ff_dim=128, dropout=0.5)
     
-    # 4. Hybrid Pooling
     avg_p = layers.GlobalAveragePooling1D()(x)
     max_p = layers.GlobalMaxPooling1D()(x)
     combined = layers.Concatenate()([avg_p, max_p])
 
-    # 5. Output Head - Add L2
-    x = layers.Dense(32, activation="relu", kernel_regularizer=l2(0.01))(combined)
+    x = layers.Dense(64, activation="relu")(combined)
     x = layers.Dropout(0.5)(x)
     outputs = layers.Dense(1, activation="sigmoid")(x)
 
     model = models.Model(inputs, outputs)
-    
-    # 6. Add Label Smoothing (The "LSTM Secret")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(1e-4), 
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1), 
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05), # 降低平滑值
         metrics=["accuracy"]
     )
     return model
@@ -147,47 +141,64 @@ def build_hybrid_model(input_shape):
 # 4. Data Generation Logic
 # ==========================================
 def get_dominant_bpm(window_data, fs=20):
-    sig = window_data[:, 9] # Acc Mag
+    """Detects BPM using raw Accelerometer Z (usually strongest for sitting/lying)"""
+    sig = window_data[:, 2] # AccZ
     sig = sig - np.mean(sig)
     freqs = np.fft.rfftfreq(len(sig), d=1/fs)
     fft_mag = np.abs(np.fft.rfft(sig))
-    idx = np.where((freqs >= 0.05) & (freqs <= 1.0))[0]
-    return freqs[idx][np.argmax(fft_mag[idx])] * 60 if len(idx)>0 else 15.0
+    # Search a wider range to find the 30-46 BPM peaks
+    idx = np.where((freqs >= 0.1) & (freqs <= 0.9))[0]
+    if len(idx) == 0: return 0.0
+    return freqs[idx][np.argmax(fft_mag[idx])] * 60
+
+def augment_window(window):
+    """Adds realistic sensor noise and amplitude variation"""
+    # 1. Random Jitter (Sensor shaking)
+    noise = np.random.normal(0, 0.005, window.shape)
+    # 2. Random Amplitude Scaling (Deep vs Shallow)
+    scale = random.uniform(0.8, 1.2)
+    return (window + noise) * scale
 
 def generate_abnormal_by_bpm(window_data, fs=20):
     orig_bpm = get_dominant_bpm(window_data, fs)
     orig_len = len(window_data)
     
-    # 嚴格定義異常頻率
-    target_bpm = random.uniform(25, 40) if random.random() > 0.5 else random.uniform(6, 10)
-    
+    # Target Tachypnea (25-45) or Bradypnea (5-10)
+    target_bpm = random.uniform(25, 45) if random.random() > 0.5 else random.uniform(5, 10)
     ratio = target_bpm / orig_bpm
     new_len = max(int(orig_len / ratio), 1)
     resampled = signal.resample(window_data, new_len)
     
-    # 這裡只做重複或截斷，不要做 **1.4 扭曲
     if ratio > 1.0:
         output = np.tile(resampled, (int(np.ceil(orig_len / new_len)), 1))[:orig_len, :]
     else:
         output = resampled[:orig_len, :]
         if len(output) < orig_len:
             output = np.pad(output, ((0, orig_len - len(output)), (0, 0)), mode='edge')
-
-    # 只加入極小量的噪聲 (模擬感測器底噪)
-    return output + np.random.normal(0, 0.005, output.shape)
+    
+    return augment_window(output)
 
 def process_single_file(file_path):
     try:
         df = pd.read_csv(file_path)
         df.columns = [c.lower() for c in df.columns]
-        ts_col = 'unix_timestamp' if 'unix_timestamp' in df.columns else 'timestamp'
+        
+        # --- 1. SYNC TO 20Hz (Critical) ---
+        # 50ms resampling ensures exactly 20Hz. 
+        # 40ms was creating 25Hz and ruining your BPM math.
+        ts_col = next(c for c in ['unix_timestamp', 'timestamp'] if c in df.columns)
         df['dt'] = pd.to_datetime(df[ts_col], unit='ms')
         df_res = df.set_index('dt').resample('50ms').mean().interpolate().ffill().bfill()
 
-        acc_mag = np.linalg.norm(df_res[[c for c in df_res.columns if 'acc' in c][:3]].values, axis=1, keepdims=True)
-        gyro_mag = np.linalg.norm(df_res[[c for c in df_res.columns if 'gyro' in c][:3]].values, axis=1, keepdims=True)
+        # --- 2. FEATURE ENGINEERING ---
+        acc_cols = [c for c in df_res.columns if 'acc' in c][:3]
+        gyro_cols = [c for c in df_res.columns if 'gyro' in c][:3]
+        acc_mag = np.linalg.norm(df_res[acc_cols].values, axis=1, keepdims=True)
+        gyro_mag = np.linalg.norm(df_res[gyro_cols].values, axis=1, keepdims=True)
         raw_data = df_res.reindex(columns=[f.lower() for f in FEATURES]).values.astype(np.float32)
         combined = np.hstack([raw_data, acc_mag, gyro_mag]) 
+        
+        # --- 3. CLEANING ---
         processed_data = clean_signal_logic(combined, fs=TARGET_FREQ)
 
         x_list, y_list = [], []
@@ -195,19 +206,32 @@ def process_single_file(file_path):
             window = processed_data[i : i + WINDOW_SIZE]
             bpm = get_dominant_bpm(window, fs=TARGET_FREQ)
             
-            # Per-Window Normalization (Aligned)
+            # --- 回歸 Z-score 正規化 ---
+            # 必須除以標準差，模型才能看清不同感測器軸的「形狀」
             window_norm = (window - np.mean(window, axis=0)) / (np.std(window, axis=0) + 1e-6)
 
-            if 12.0 <= bpm <= 20.0:
-                x_list.append(window_norm); y_list.append(0)
+            if 10.0 <= bpm <= 22.0:
+                # LABEL 0: NORMAL
+                x_list.append(window_norm)
+                y_list.append(0) 
+                
+                # --- 5. AUGMENTATION ---
+                # Create synthetic abnormal data from normal samples
                 for _ in range(AUGMENTATION_COUNT):
                     ab_win = generate_abnormal_by_bpm(window, fs=TARGET_FREQ)
+                    # 增強數據也必須進行 Z-score
                     ab_norm = (ab_win - np.mean(ab_win, axis=0)) / (np.std(ab_win, axis=0) + 1e-6)
-                    x_list.append(ab_norm); y_list.append(1)
+                    x_list.append(ab_norm)
+                    y_list.append(1) 
             else:
-                x_list.append(window_norm); y_list.append(1)
+                # LABEL 1: ABNORMAL (Naturally occurring)
+                x_list.append(window_norm)
+                y_list.append(1)
+                
         return np.array(x_list), np.array(y_list)
-    except: return None, None
+    except Exception as e:
+        print(f"Error in {file_path}: {e}")
+        return None, None
 
 # ==========================================
 # 5. Training Execution
