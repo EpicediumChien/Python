@@ -1,72 +1,63 @@
 import tensorflow as tf
-import joblib
-import os
 import numpy as np
+import os
 
 # ==========================================
-# Settings
+# 1. 設定路徑
 # ==========================================
-# keras_path = 'models/respiration_classifier.keras'
-keras_path = 'models/movement_classifier.keras'
-# scaler_path = 'models/scaler.pkl'
-scaler_path = 'models/movement_scaler.pkl'
-# output_tflite = 'respiration_model.tflite'
-output_tflite = 'movement_model.tflite'
+keras_path = 'models/respiration_CNNxLSTM_classifier.keras'
+output_tflite = 'respiration_CNNxLSTM_classifier.tflite'
 
 print("--- Step 1: Loading Model ---")
 if not os.path.exists(keras_path):
-    print(f"❌ Error: Cannot find {keras_path}")
+    print(f"❌ Error: {keras_path} not found")
     exit()
 
-model = tf.keras.models.load_model(keras_path)
+# 載入原始模型 (不使用 safe_mode 以增加相容性)
+model = tf.keras.models.load_model(keras_path, safe_mode=False)
+print("✅ Model Loaded.")
 
-# --- AUTO-DETECT SHAPES ---
-# model.input_shape returns something like (None, 150, 11)
-input_shape = model.layers[0].input_shape
-if isinstance(input_shape, list): input_shape = input_shape[0]
+# ==========================================
+# 2. 重新包裝模型 (解決 Untracked Resource 與 Version 12 問題)
+# ==========================================
+print("\n--- Step 2: Re-wrapping Model with Fixed Shape [1, 200, 11] ---")
 
-# Extract the window size and feature count from the model itself
-detected_window = input_shape[1]
-detected_features = input_shape[2]
-
-print(f"✅ Model Loaded. Detected Input Requirement: Window={detected_window}, Features={detected_features}")
-
-print("\n--- Step 2: Converting to TFLite ---")
 try:
-    # We use the detected shapes to ensure compatibility
-    run_model = tf.function(lambda x: model(x))
+    # 建立一個全新的輸入層，強制 Batch Size = 1
+    # 這能確保轉出的 FULLY_CONNECTED 是手機支援的舊版本 (v9/v10)
+    input_layer = tf.keras.layers.Input(batch_shape=(1, 200, 11), name='input_fixed')
     
-    concrete_func = run_model.get_concrete_function(
-        tf.TensorSpec([1, detected_window, detected_features], model.inputs[0].dtype)
-    )
+    # 將資料餵入舊模型，強制設定 training=False 排除 Dropout 的干擾
+    output_layer = model(input_layer, training=False)
+    
+    # 建立一個新的 Functional Model
+    fixed_model = tf.keras.models.Model(inputs=input_layer, outputs=output_layer)
+    print("✅ Fixed Model Graph Re-built.")
 
-    converter = tf.lite.TFLiteConverter.from_concrete_functions([concrete_func])
+# ==========================================
+# 3. 執行轉換
+# ==========================================
+    print("\n--- Step 3: Converting to TFLite ---")
+    
+    converter = tf.lite.TFLiteConverter.from_keras_model(fixed_model)
 
-    # Enable support for LSTM/Complex ops
+    # 針對 LSTM 的核心設定
     converter.target_spec.supported_ops = [
         tf.lite.OpsSet.TFLITE_BUILTINS, 
-        tf.lite.OpsSet.SELECT_TF_OPS    
+        tf.lite.OpsSet.SELECT_TF_OPS
     ]
-    converter._experimental_lower_tensor_list_ops = False
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-
+    
+    # 關閉優化 (這在 Keras 3 下最安全，避免產生 v12 運算元)
+    converter.optimizations = []
+    
+    # 執行轉換
     tflite_model = converter.convert()
     
     with open(output_tflite, 'wb') as f:
         f.write(tflite_model)
-    print(f"✅ SUCCESS! TFLite saved as: {output_tflite}")
+    
+    print(f"\n✅ 最終成功！產出的檔案版本已降級至相容版。")
+    print(f"請將此檔案放入手機 assets: {output_tflite}")
 
 except Exception as e:
-    print(f"❌ Conversion failed: {e}")
-    exit()
-
-print("\n--- Step 3: Extracting Scaler for Kotlin ---")
-if os.path.exists(scaler_path):
-    scaler = joblib.load(scaler_path)
-    means = scaler.mean_.tolist()
-    stds = scaler.scale_.tolist()
-
-    print(f"private val SCALER_MEANS = floatArrayOf({', '.join([f'{x:.6f}f' for x in means])})")
-    print(f"private val SCALER_STDS  = floatArrayOf({', '.join([f'{x:.6f}f' for x in stds])})")
-else:
-    print("⚠️ Scaler.pkl not found. You will need to extract means/stds manually.")
+    print(f"❌ 轉換失敗具體原因: {e}")

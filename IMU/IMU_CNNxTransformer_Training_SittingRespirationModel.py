@@ -12,7 +12,10 @@ import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 # To stable transoformer
 from tensorflow.keras.regularizers import l2
-from tensorflow.keras.layers import GaussianNoise
+from tensorflow.keras.layers import (GaussianNoise, Input, Conv1D, BatchNormalization, MaxPooling1D, 
+                                    GlobalAveragePooling1D, GlobalMaxPooling1D, 
+                                    Dense, Dropout, concatenate, Bidirectional, LSTM, 
+                                    LayerNormalization, MultiHeadAttention, Add)
 from layers_utils import PositionalEmbedding, transformer_encoder
 
 # ==========================================
@@ -103,37 +106,49 @@ def clean_signal_logic(data, fs=20):
 #     return x + res
 
 def build_hybrid_model(input_shape):
-    inputs = layers.Input(shape=input_shape)
-    x = GaussianNoise(0.02)(inputs)
-
-    # 第一層 CNN 捕捉基礎特徵
-    x = layers.Conv1D(64, kernel_size=7, padding="same", activation="relu", kernel_regularizer=l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(pool_size=2)(x) # 200 -> 100
-
-    # 第二層 CNN 增加通道數
-    x = layers.Conv1D(128, kernel_size=5, padding="same", activation="relu", kernel_regularizer=l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(pool_size=2)(x) # 100 -> 50
+    inputs = Input(shape=input_shape)
     
-    # 增強後的 Transformer
-    x = PositionalEmbedding(50, 128)(x) 
-    # 增加 head 數量到 4 或 8
+    # 1. 增加輸入雜訊，破壞模型對特定數值的依賴
+    x = GaussianNoise(0.05)(inputs)
+
+    # 2. 強化 CNN 特徵提取器 (加上 L2 與 Dropout)
+    # 200 -> 100
+    x = Conv1D(64, 7, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2)(x)
+    x = Dropout(0.3)(x)
+
+    # 100 -> 50
+    x = Conv1D(128, 5, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2)(x)
+    x = Dropout(0.3)(x)
+    
+    # 3. Transformer Encoder 部分
+    # 此時 Sequence Length 為 50, Embedding Dim 為 128
+    x = PositionalEmbedding(50, 128)(x)
+    
+    # 增加 Transformer 內部的 Dropout 
+    # 使用 2 個 Head 即可（數據量不大，Head 太多容易過擬合）
     x = transformer_encoder(x, head_size=64, num_heads=2, ff_dim=128, dropout=0.5)
     
-    avg_p = layers.GlobalAveragePooling1D()(x)
-    max_p = layers.GlobalMaxPooling1D()(x)
-    combined = layers.Concatenate()([avg_p, max_p])
+    # 4. 混合池化 (Hybrid Pooling) - 對呼吸節律識別很有幫助
+    avg_p = GlobalAveragePooling1D()(x)
+    max_p = GlobalMaxPooling1D()(x)
+    combined = concatenate([avg_p, max_p])
 
-    x = layers.Dense(64, activation="relu")(combined)
-    x = layers.Dropout(0.5)(x)
-    outputs = layers.Dense(1, activation="sigmoid")(x)
+    # 5. 輸出層
+    x = Dense(64, activation="relu", kernel_regularizer=l2(1e-3))(combined)
+    x = Dropout(0.5)(x)
+    outputs = Dense(1, activation="sigmoid")(x)
 
-    model = models.Model(inputs, outputs)
+    model = models.Model(inputs, outputs, name="Transformer_Model")
+    
+    # 使用更低的學習率，讓 Transformer 穩定收斂
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-4), 
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05), # 降低平滑值
-        metrics=["accuracy"]
+        optimizer=tf.keras.optimizers.Adam(5e-5), 
+        loss='binary_crossentropy', 
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
     )
     return model
 
@@ -175,6 +190,17 @@ def generate_abnormal_by_bpm(window_data, fs=20):
         output = resampled[:orig_len, :]
         if len(output) < orig_len:
             output = np.pad(output, ((0, orig_len - len(output)), (0, 0)), mode='edge')
+
+    # --- 關鍵修正：模擬吸管呼吸/呼吸困難的物理特徵 ---
+
+    # 非線性波形扭曲 (Simulate Effort/Sharpness)
+    # 透過次方運算讓波峰變尖，模擬吸氣吃力（Gasping）的波形
+    gamma = random.uniform(1.2, 1.5) 
+    output = np.sign(output) * (np.abs(output) ** gamma)
+
+    # 模擬肌肉震顫雜訊 (Muscle Tremor/Jitter)
+    # 呼吸困難時身體會有細微抖動，這在 IMU 上是重要的 Abnormal 特徵
+    output += np.random.normal(0, 0.015, output.shape)
     
     return augment_window(output)
 
@@ -182,6 +208,8 @@ def process_single_file(file_path):
     try:
         df = pd.read_csv(file_path)
         df.columns = [c.lower() for c in df.columns]
+        if len(df) < 50: # 原始數據太少，直接跳過
+            return None, None
         
         # --- 1. SYNC TO 20Hz (Critical) ---
         # 50ms resampling ensures exactly 20Hz. 
@@ -189,6 +217,10 @@ def process_single_file(file_path):
         ts_col = next(c for c in ['unix_timestamp', 'timestamp'] if c in df.columns)
         df['dt'] = pd.to_datetime(df[ts_col], unit='ms')
         df_res = df.set_index('dt').resample('50ms').mean().interpolate().ffill().bfill()
+        
+        # 關鍵修正：檢查重採樣後的長度是否足以進行濾波 (Savgol_win=15) 與 窗口切分
+        if len(df_res) <= 20: # 至少要比 savgol_win 大
+            return None, None
 
         # --- 2. FEATURE ENGINEERING ---
         acc_cols = [c for c in df_res.columns if 'acc' in c][:3]
@@ -201,11 +233,18 @@ def process_single_file(file_path):
         # --- 3. CLEANING ---
         processed_data = clean_signal_logic(combined, fs=TARGET_FREQ)
 
+        # 檢查清理後是否有足夠長度切出至少一個 Window
+        if len(processed_data) < WINDOW_SIZE:
+            return None, None
+
         x_list, y_list = [], []
         for i in range(0, len(processed_data) - WINDOW_SIZE, STEP_SIZE):
             window = processed_data[i : i + WINDOW_SIZE]
             bpm = get_dominant_bpm(window, fs=TARGET_FREQ)
             
+            # --- 核心修正 1：對所有數據（包含 Normal）加入微量底噪 ---
+            # 這能防止模型把「感測器雜訊」誤認為「呼吸異常」
+            window = window + np.random.normal(0, 0.002, window.shape)
             # --- 回歸 Z-score 正規化 ---
             # 必須除以標準差，模型才能看清不同感測器軸的「形狀」
             window_norm = (window - np.mean(window, axis=0)) / (np.std(window, axis=0) + 1e-6)
@@ -257,8 +296,17 @@ if __name__ == "__main__":
     X_test, y_test = collect_and_balance(file_list[split:])
 
     model = build_hybrid_model((WINDOW_SIZE, 11))
-    history = model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=100, batch_size=64,
-                        callbacks=[EarlyStopping(patience=15, restore_best_weights=True), ReduceLROnPlateau(patience=5)])
+    history = model.fit(
+        X_train, y_train, 
+        validation_data=(X_test, y_test), 
+        epochs=120, 
+        batch_size=32,
+        callbacks=[
+            # 當 Val Loss 超過 10 次沒下降就停止，避免 Loss 反彈太嚴重
+            EarlyStopping(patience=10, restore_best_weights=True, monitor='val_loss'), 
+            ReduceLROnPlateau(patience=5, factor=0.5, monitor='val_loss', min_lr=1e-6)
+        ]
+    )
 
     y_pred_prob = model.predict(X_test)
     y_pred = (y_pred_prob > 0.4).astype(int)

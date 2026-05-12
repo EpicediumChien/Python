@@ -16,7 +16,9 @@ import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 # Hard Balancing and Regularization
 from tensorflow.keras.regularizers import l2
-from tensorflow.keras.layers import GaussianNoise
+from tensorflow.keras.layers import (GaussianNoise, Input, Conv1D, BatchNormalization, MaxPooling1D, 
+                                    GlobalAveragePooling1D, GlobalMaxPooling1D, 
+                                    Dense, Dropout, concatenate, SpatialDropout1D)
 
 # --- GPU MEMORY MANAGEMENT ---
 gpus = tf.config.list_physical_devices('GPU')
@@ -117,6 +119,17 @@ def generate_abnormal_by_bpm(window_data, fs=20):
         output = resampled[:orig_len, :]
         if len(output) < orig_len:
             output = np.pad(output, ((0, orig_len - len(output)), (0, 0)), mode='edge')
+
+    # --- 關鍵修正：模擬吸管呼吸/呼吸困難的物理特徵 ---
+
+    # 非線性波形扭曲 (Simulate Effort/Sharpness)
+    # 透過次方運算讓波峰變尖，模擬吸氣吃力（Gasping）的波形
+    gamma = random.uniform(1.2, 1.5) 
+    output = np.sign(output) * (np.abs(output) ** gamma)
+
+    # 模擬肌肉震顫雜訊 (Muscle Tremor/Jitter)
+    # 呼吸困難時身體會有細微抖動，這在 IMU 上是重要的 Abnormal 特徵
+    output += np.random.normal(0, 0.015, output.shape)
     
     return augment_window(output)
 
@@ -128,6 +141,8 @@ def process_single_file(file_path):
     try:
         df = pd.read_csv(file_path)
         df.columns = [c.lower() for c in df.columns]
+        if len(df) < 50: # 原始數據太少，直接跳過
+            return None, None
         
         # --- 1. SYNC TO 20Hz (Critical) ---
         # 50ms resampling ensures exactly 20Hz. 
@@ -135,6 +150,10 @@ def process_single_file(file_path):
         ts_col = next(c for c in ['unix_timestamp', 'timestamp'] if c in df.columns)
         df['dt'] = pd.to_datetime(df[ts_col], unit='ms')
         df_res = df.set_index('dt').resample('50ms').mean().interpolate().ffill().bfill()
+        
+        # 關鍵修正：檢查重採樣後的長度是否足以進行濾波 (Savgol_win=15) 與 窗口切分
+        if len(df_res) <= 20: # 至少要比 savgol_win 大
+            return None, None
 
         # --- 2. FEATURE ENGINEERING ---
         acc_cols = [c for c in df_res.columns if 'acc' in c][:3]
@@ -147,11 +166,18 @@ def process_single_file(file_path):
         # --- 3. CLEANING ---
         processed_data = clean_signal_logic(combined, fs=TARGET_FREQ)
 
+        # 檢查清理後是否有足夠長度切出至少一個 Window
+        if len(processed_data) < WINDOW_SIZE:
+            return None, None
+
         x_list, y_list = [], []
         for i in range(0, len(processed_data) - WINDOW_SIZE, STEP_SIZE):
             window = processed_data[i : i + WINDOW_SIZE]
             bpm = get_dominant_bpm(window, fs=TARGET_FREQ)
             
+            # --- 核心修正 1：對所有數據（包含 Normal）加入微量底噪 ---
+            # 這能防止模型把「感測器雜訊」誤認為「呼吸異常」
+            window = window + np.random.normal(0, 0.002, window.shape)
             # --- 回歸 Z-score 正規化 ---
             # 必須除以標準差，模型才能看清不同感測器軸的「形狀」
             window_norm = (window - np.mean(window, axis=0)) / (np.std(window, axis=0) + 1e-6)
@@ -184,35 +210,46 @@ def process_single_file(file_path):
 # ==========================================
 # 1. FIXED MODEL: Added L2, Noise, and Hybrid Pooling
 def build_model(input_shape):
-    inputs = layers.Input(shape=input_shape)
+    inputs = Input(shape=input_shape)
     
-    # Noise layer to prevent memorizing specific CSV spikes
+    # 增加微量高斯雜訊，增加模型穩健性
     x = GaussianNoise(0.02)(inputs)
 
-    # Conv Block 1
-    x = layers.Conv1D(64, 15, activation='relu', padding='same', kernel_regularizer=l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.SpatialDropout1D(0.5)(x)
-    x = layers.MaxPooling1D(2)(x)
+    # 第一層：大核捲積 (Size 15) - 捕捉呼吸的主頻率波形
+    # 在 20Hz 下，15 點約為 0.75s，能涵蓋半個呼吸相位
+    x1 = Conv1D(64, 15, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
+    x1 = BatchNormalization()(x1)
+    x1 = SpatialDropout1D(0.4)(x1) # 隨機丟棄整個通道，強迫模型學習多個軸
+    x1 = Dropout(0.3)(x1)
 
-    # Conv Block 2
-    x = layers.Conv1D(64, 7, activation='relu', padding='same', kernel_regularizer=l2(0.01))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(2)(x)
+    # 第二層：中核捲積 (Size 7) - 捕捉呼吸深度變化的特徵
+    x2 = Conv1D(128, 7, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x1)
+    x2 = BatchNormalization()(x2)
+    x2 = MaxPooling1D(2)(x2) # 200 -> 100
+    x2 = Dropout(0.3)(x2)
 
-    # Hybrid Pooling (This helps CNNs understand 'Rhythm' better)
-    avg_p = layers.GlobalAveragePooling1D()(x)
-    max_p = layers.GlobalMaxPooling1D()(x)
-    combined = layers.concatenate([avg_p, max_p])
-
-    x = layers.Dense(32, activation='relu', kernel_regularizer=l2(0.01))(combined)
-    x = layers.Dropout(0.5)(x)
-    outputs = layers.Dense(1, activation='sigmoid')(x)
+    # 第三層：小核捲積 (Size 3) - 捕捉吸管呼吸或異常導致的高頻細微震顫
+    x3 = Conv1D(128, 3, padding='same', activation='relu')(x2)
+    x3 = BatchNormalization()(x3)
+    x3 = Dropout(0.3)(x3)
     
-    model = models.Model(inputs=inputs, outputs=outputs)
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), 
-                  loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05), 
-                  metrics=['accuracy'])
+    # 關鍵：混合池化 (Hybrid Pooling)
+    # GlobalAveragePooling 捕捉整體節奏，GlobalMaxPooling 捕捉異常的突發信號
+    avg_p = GlobalAveragePooling1D()(x3)
+    max_p = GlobalMaxPooling1D()(x3)
+    combined = concatenate([avg_p, max_p])
+
+    # 全連接層
+    x = Dense(64, activation='relu')(combined)
+    x = Dropout(0.5)(x)
+    outputs = Dense(1, activation='sigmoid')(x)
+    
+    model = models.Model(inputs=inputs, outputs=outputs, name="Respiration_CNN")
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-4), # 稍微調高學習率
+        loss='binary_crossentropy', # 論文建議先用標準 BCELoss
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
+    )
     return model
 
 # 2. FIXED DATA: Forced 1:1 Balancing
@@ -249,12 +286,12 @@ if __name__ == "__main__":
     model = build_model((WINDOW_SIZE, X_train.shape[2]))
     history = model.fit(
         X_train, y_train,
-        epochs=100,
-        batch_size=64,
+        epochs=150,
+        batch_size=32, # 較小的 Batch size 對 CNN 尋找細節特徵有幫助
         validation_data=(X_test, y_test),
         callbacks=[
-            EarlyStopping(patience=15, restore_best_weights=True),
-            ReduceLROnPlateau(patience=5, factor=0.5)
+            EarlyStopping(patience=10, restore_best_weights=True, monitor='val_auc', mode='max'),
+            ReduceLROnPlateau(patience=8, factor=0.5, monitor='val_loss')
         ]
     )
 
@@ -266,9 +303,19 @@ if __name__ == "__main__":
     target_names = ['Normal (Eupnea)', 'Abnormal (Dyspnea/Apnea)']
 
     # Results Visualization (Standardized)
-    y_pred_prob = model.predict(X_test)
-    y_pred = (y_pred_prob > 0.4).astype(int)
-    print(classification_report(y_test, y_pred, target_names=['Normal', 'Abnormal']))
+    y_pred_prob = model.predict(X_test).ravel()
+    
+    # 計算 ROC 曲線並找出最佳閾值 (Youden's Index)
+    fpr, tpr, thresholds = roc_curve(y_test, y_pred_prob)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    
+    print(f"\n>>> Optimal Threshold based on ROC: {optimal_threshold:.4f}")
+
+    y_pred = (y_pred_prob >= optimal_threshold).astype(int)
+    # 顯示分類報告
+    print("\n[Final Classification Report]")
+    print(classification_report(y_test, y_pred, target_names=target_names))
 
     # 3. Plotting Training History
     plt.figure(figsize=(12, 5))

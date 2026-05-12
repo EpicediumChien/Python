@@ -117,6 +117,17 @@ def generate_abnormal_by_bpm(window_data, fs=20):
         output = resampled[:orig_len, :]
         if len(output) < orig_len:
             output = np.pad(output, ((0, orig_len - len(output)), (0, 0)), mode='edge')
+
+    # --- 關鍵修正：模擬吸管呼吸/呼吸困難的物理特徵 ---
+
+    # 非線性波形扭曲 (Simulate Effort/Sharpness)
+    # 透過次方運算讓波峰變尖，模擬吸氣吃力（Gasping）的波形
+    gamma = random.uniform(1.2, 1.5) 
+    output = np.sign(output) * (np.abs(output) ** gamma)
+
+    # 模擬肌肉震顫雜訊 (Muscle Tremor/Jitter)
+    # 呼吸困難時身體會有細微抖動，這在 IMU 上是重要的 Abnormal 特徵
+    output += np.random.normal(0, 0.015, output.shape)
     
     return augment_window(output)
 
@@ -128,6 +139,8 @@ def process_single_file(file_path):
     try:
         df = pd.read_csv(file_path)
         df.columns = [c.lower() for c in df.columns]
+        if len(df) < 50: # 原始數據太少，直接跳過
+            return None, None
         
         # --- 1. SYNC TO 20Hz (Critical) ---
         # 50ms resampling ensures exactly 20Hz. 
@@ -135,6 +148,10 @@ def process_single_file(file_path):
         ts_col = next(c for c in ['unix_timestamp', 'timestamp'] if c in df.columns)
         df['dt'] = pd.to_datetime(df[ts_col], unit='ms')
         df_res = df.set_index('dt').resample('50ms').mean().interpolate().ffill().bfill()
+        
+        # 關鍵修正：檢查重採樣後的長度是否足以進行濾波 (Savgol_win=15) 與 窗口切分
+        if len(df_res) <= 20: # 至少要比 savgol_win 大
+            return None, None
 
         # --- 2. FEATURE ENGINEERING ---
         acc_cols = [c for c in df_res.columns if 'acc' in c][:3]
@@ -147,11 +164,18 @@ def process_single_file(file_path):
         # --- 3. CLEANING ---
         processed_data = clean_signal_logic(combined, fs=TARGET_FREQ)
 
+        # 檢查清理後是否有足夠長度切出至少一個 Window
+        if len(processed_data) < WINDOW_SIZE:
+            return None, None
+
         x_list, y_list = [], []
         for i in range(0, len(processed_data) - WINDOW_SIZE, STEP_SIZE):
             window = processed_data[i : i + WINDOW_SIZE]
             bpm = get_dominant_bpm(window, fs=TARGET_FREQ)
             
+            # --- 核心修正 1：對所有數據（包含 Normal）加入微量底噪 ---
+            # 這能防止模型把「感測器雜訊」誤認為「呼吸異常」
+            window = window + np.random.normal(0, 0.002, window.shape)
             # --- 回歸 Z-score 正規化 ---
             # 必須除以標準差，模型才能看清不同感測器軸的「形狀」
             window_norm = (window - np.mean(window, axis=0)) / (np.std(window, axis=0) + 1e-6)
@@ -184,29 +208,26 @@ def process_single_file(file_path):
 # ==========================================
 def build_model(input_shape):
     inputs = Input(shape=input_shape)
-    x = GaussianNoise(0.02)(inputs) 
+    x = GaussianNoise(0.02)(inputs)
 
-    # 1. Wider CNN Kernels (Size 15) to see the breath wave shape
-    x = Conv1D(64, 15, padding='same', activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Conv1D(64, 7, padding='same', activation='relu')(x)
     x = BatchNormalization()(x)
-    x = MaxPooling1D(2)(x)
+    x = MaxPooling1D(2)(x) # 200 -> 100
 
-    # 2. Bi-LSTM with internal dropout to prevent memorizing noise
-    x = Bidirectional(LSTM(64, return_sequences=True, dropout=0.3, recurrent_dropout=0.2))(x)
+    # Bidirectional LSTM 捕捉前後時序依賴
+    # 移除 recurrent_dropout 以加速 GPU 訓練並提高穩健性
+    x = Bidirectional(LSTM(64, return_sequences=True, dropout=0.3))(x)
     
-    # 3. Pool the rhythm features
     avg_p = GlobalAveragePooling1D()(x)
     max_p = GlobalMaxPooling1D()(x)
     combined = concatenate([avg_p, max_p])
 
-    # 4. Fully Connected
     x = Dense(32, activation='relu')(combined)
     x = Dropout(0.5)(x)
     outputs = Dense(1, activation='sigmoid')(x)
 
-    model = models.Model(inputs, outputs)
-    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), 
-                  loss='binary_crossentropy', metrics=['accuracy'])
+    model = models.Model(inputs, outputs, name="LSTM_Model")
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-4), loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
 if __name__ == "__main__":
@@ -249,8 +270,8 @@ if __name__ == "__main__":
     
     history = model.fit(
         X_train, y_train,
-        epochs=100,
-        batch_size=64,
+        epochs=120,
+        batch_size=32,
         validation_data=(X_test, y_test),
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),

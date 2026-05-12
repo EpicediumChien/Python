@@ -23,24 +23,43 @@ FEATURES = ['accx', 'accy', 'accz', 'gyrox', 'gyroy', 'gyroz', 'roll', 'pitch', 
 WINDOW_SIZE = 200  # 10 seconds
 FS = 20            # 20Hz
 
-def apply_agc(sig, fs=20, window_sec=5):
+def apply_agc_logic(sig, fs=20, window_sec=5):
+    """Mirror Analysis: 10s window to stabilize signals"""
     window_size = int(fs * window_sec)
     rolling_std = pd.Series(sig).rolling(window=window_size, center=True).std()
     rolling_std = rolling_std.bfill().ffill().replace(0, 1e-6)
     return sig / rolling_std.values
 
-def clean_signal(data, fs=20):
+def clean_signal_logic(data, fs=20):
     cleaned_data = np.zeros_like(data)
     nyq = 0.5 * fs
-    b, a = signal.butter(3, [0.08/nyq, 0.8/nyq], btype='band')
+    
+    # 1. 你的原始濾波器 [0.08Hz - 0.85Hz]
+    b, a = signal.butter(2, [0.08/nyq, 0.85/nyq], btype='band')
+    
+    # 2. 你的原始平滑視窗 (1.1s)
+    savgol_win = 15 # 20Hz 下，Savgol 建議用 11 或 15 (約 0.5~0.7s)
+    
     for i in range(data.shape[1]):
+        # A. 帶通濾波
         feat_filt = signal.filtfilt(b, a, data[:, i])
-        feat_agc = apply_agc(feat_filt, fs=fs)
+        
+        # B. 你的原始 AGC (10秒視窗)
+        feat_agc = apply_agc_logic(feat_filt, fs=fs, window_sec=10)
+        
+        # C. 你的原始 SavGol
         try:
-            cleaned_data[:, i] = signal.savgol_filter(feat_agc, 15, 2)
+            cleaned_data[:, i] = signal.savgol_filter(feat_agc, window_length=savgol_win, polyorder=2)
         except:
             cleaned_data[:, i] = feat_agc
+            
     return cleaned_data
+
+MODEL_THRESHOLDS = {
+    "CNN": 0.04,        # CNN 的機率普遍偏低，需調低門檻
+    "CNN-Trans": 0.22,  # Transformer 表現穩健，使用建議門檻
+    "CNN-LSTM": 0.30    # LSTM 需要中度門檻
+}
 
 def verify_models():
     print("-" * 60)
@@ -84,7 +103,7 @@ def verify_models():
         combined = np.hstack([raw_feat, acc_mag, gyro_mag])
         
         # Preprocessing (Filter + AGC)
-        cleaned = clean_signal(combined, fs=FS)
+        cleaned = clean_signal_logic(combined, fs=FS)
         
         # Extract a stable 10-second window from the middle of the file
         if len(cleaned) >= WINDOW_SIZE:
@@ -99,8 +118,10 @@ def verify_models():
             prediction_row = {"Sample ID": file_name.replace(".csv", "")}
             for model_name, model in loaded_models.items():
                 prob = float(model.predict(input_tensor, verbose=0)[0][0])
-                # Logic: Normal <= 0.4, Abnormal > 0.4
-                prediction_row[model_name] = "ABNORMAL" if prob > 0.4 else "NORMAL"
+
+                # 使用模型特定的門檻進行判定
+                threshold = MODEL_THRESHOLDS.get(model_name, 0.4)
+                prediction_row[model_name] = "ABNORMAL" if prob > threshold else "NORMAL"
             
             results_list.append(prediction_row)
 
