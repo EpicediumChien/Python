@@ -65,88 +65,50 @@ def clean_signal_logic(data, fs=20):
 # ==========================================
 # 3. Model Components
 # ==========================================
-@tf.keras.utils.register_keras_serializable(package="MyLayers")
-# class PositionalEmbedding(layers.Layer):
-#     def __init__(self, sequence_length, embed_dim, **kwargs):
-#         # We ensure the name of the layer is what Keras expects
-#         super().__init__(**kwargs)
-#         self.sequence_length = sequence_length
-#         self.embed_dim = embed_dim
-#         # Create an internal embedding layer with the name 'embedding'
-#         self.embedding = layers.Embedding(
-#             input_dim=sequence_length, 
-#             output_dim=embed_dim, 
-#             name="embedding" 
-#         )
-
-#     def call(self, inputs):
-#         # inputs shape: (Batch, 50, 128)
-#         length = tf.shape(inputs)[1]
-#         positions = tf.range(start=0, limit=length, delta=1)
-#         embedded_positions = self.embedding(positions)
-#         return inputs + embedded_positions
-
-#     def get_config(self):
-#         config = super().get_config()
-#         config.update({
-#             "sequence_length": self.sequence_length,
-#             "embed_dim": self.embed_dim,
-#         })
-#         return config
-
-# def transformer_encoder(inputs, head_size, num_heads, ff_dim, dropout=0):
-#     x = layers.LayerNormalization(epsilon=1e-6)(inputs)
-#     x = layers.MultiHeadAttention(key_dim=head_size, num_heads=num_heads, dropout=dropout)(x, x)
-#     x = layers.Dropout(dropout)(x)
-#     res = x + inputs
-#     x = layers.LayerNormalization(epsilon=1e-6)(res)
-#     x = layers.Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
-#     x = layers.Dropout(dropout)(x)
-#     x = layers.Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
-#     return x + res
 
 def build_hybrid_model(input_shape):
     inputs = Input(shape=input_shape)
     
-    # 1. 增加輸入雜訊，破壞模型對特定數值的依賴
+    # 1. 增加輸入雜訊 (保持不變)
     x = GaussianNoise(0.05)(inputs)
 
-    # 2. 強化 CNN 特徵提取器 (加上 L2 與 Dropout)
-    # 200 -> 100
+    # 2. 強化 CNN 特徵提取器
+    # 第一層：200 -> 100 點
     x = Conv1D(64, 7, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
-    x = BatchNormalization()(x)
+    x = BatchNormalization() (x)
     x = MaxPooling1D(2)(x)
     x = Dropout(0.3)(x)
 
-    # 100 -> 50
-    x = Conv1D(128, 5, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
+    # 第二層：100 -> 50 點
+    # 【關鍵修正】：將 filters 從 128 改為 64，以匹配後面的 Embedding
+    x = Conv1D(64, 5, padding='same', activation='relu', kernel_regularizer=l2(1e-3))(x)
     x = BatchNormalization()(x)
     x = MaxPooling1D(2)(x)
     x = Dropout(0.3)(x)
     
     # 3. Transformer Encoder 部分
-    # 此時 Sequence Length 為 50, Embedding Dim 為 128
-    x = PositionalEmbedding(50, 128)(x)
+    # 此時 x 的 shape 是 (None, 50, 64)
+    # 【關鍵修正】：確保 sequence_length=50, embed_dim=64
+    x = PositionalEmbedding(50, 64)(x)
     
-    # 增加 Transformer 內部的 Dropout 
-    # 使用 2 個 Head 即可（數據量不大，Head 太多容易過擬合）
-    x = transformer_encoder(x, head_size=64, num_heads=2, ff_dim=128, dropout=0.5)
+    # Transformer 內部的維度也要對齊 64
+    x = transformer_encoder(x, head_size=64, num_heads=2, ff_dim=64, dropout=0.5)
     
-    # 4. 混合池化 (Hybrid Pooling) - 對呼吸節律識別很有幫助
+    # 4. 混合池化 (保持不變)
     avg_p = GlobalAveragePooling1D()(x)
     max_p = GlobalMaxPooling1D()(x)
     combined = concatenate([avg_p, max_p])
 
-    # 5. 輸出層
-    x = Dense(64, activation="relu", kernel_regularizer=l2(1e-3))(combined)
+    # 5. 輸出層 (保持不變)
+    x = Dense(32, activation="relu", kernel_regularizer=l2(1e-3))(combined)
     x = Dropout(0.5)(x)
     outputs = Dense(1, activation="sigmoid")(x)
 
     model = models.Model(inputs, outputs, name="Transformer_Model")
     
-    # 使用更低的學習率，讓 Transformer 穩定收斂
+    # 使用 Adam 優化器
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(5e-5), 
+        optimizer=tf.keras.optimizers.Adam(1e-4), # 稍微調高一點點學習率試試
         loss='binary_crossentropy', 
         metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
     )

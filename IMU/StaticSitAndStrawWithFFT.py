@@ -3,95 +3,105 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
-from scipy.fft import fft, fftfreq
-from scipy.signal import find_peaks
+from scipy.stats import pearsonr
 
-# --- File Paths ---
-NORMAL_FILE = os.path.join('data', 'StrawCompare', 'StaticSit_imu_YAHBOOM_20260320_002717.csv')
-ABNORMAL_FILE = os.path.join('data', 'StrawCompare', 'Straw_Dyspnea_imu_YAHBOOM_20260320_003148.csv')
+# ==========================================
+# 1. Configuration & Path Setup
+# ==========================================
+# Update to your specific folder
+DATA_DIR = r"C:\Git\Python\IMU\data\Time Example"
+FS = 20  # Change to 20 if your IMU is set to 20Hz
 
-FS = 10  # Sampling Frequency
+# Define the Metronome BPMs you tested and their corresponding filenames
+# Note: Ensure the filenames match the files in your "Time Example" folder
+test_cases = {
+    10: "10 BPM.csv",
+    14: "14 BPM.csv",
+    18: "18 BPM.csv",
+    22: "22 BPM.csv",
+    26: "26 BPM.csv",
+    30: "30 BPM.csv",
+    34: "34 BPM.csv",
+    38: "38 BPM.csv",
+    42: "42 BPM.csv",
+    46: "46 BPM.csv"
+}
 
-def get_respiratory_data(file_path):
-    # Load data (assuming columns 3,4,5 are Accel X,Y,Z)
-    df = pd.read_csv(file_path)
-    raw_sig = np.linalg.norm(df.iloc[:, [3, 4, 5]].values, axis=1) 
+# ==========================================
+# 2. Core Processing Function
+# ==========================================
+def calculate_imu_bpm(file_path, fs):
+    if not os.path.exists(file_path):
+        print(f"Warning: File not found {file_path}")
+        return np.nan
     
-    # 60-second Window
-    window_size = FS * 60
-    if len(raw_sig) > window_size:
-        start = len(raw_sig) // 2 - (window_size // 2)
-        sig_crop = raw_sig[int(start):int(start + window_size)]
-    else:
-        sig_crop = raw_sig
-        
-    # 1. Detrend and Filter (Use a higher order for sharper cutoff)
-    sig_detrend = signal.detrend(sig_crop)
-    nyq = 0.5 * FS
-    # Bandpass [0.1Hz (6 BPM) to 0.8Hz (48 BPM)]
-    b, a = signal.butter(4, [0.1/nyq, 0.8/nyq], btype='band')
+    df = pd.read_csv(file_path)
+    # Use Accel Magnitude (columns 3, 4, 5)
+    raw_sig = np.linalg.norm(df.iloc[:, [3, 4, 5]].values, axis=1)
+    
+    # Simple Pre-processing for FFT
+    sig_detrend = signal.detrend(raw_sig)
+    nyq = 0.5 * fs
+    b, a = signal.butter(2, [0.1/nyq, 1.2/nyq], btype='band') # Broad range for all tests
     sig_filt = signal.filtfilt(b, a, sig_detrend)
     
-    # 2. Simple Normalization (Instead of rolling AGC which can distort peaks)
-    sig_norm = (sig_filt - np.mean(sig_filt)) / np.std(sig_filt)
+    # FFT to find dominant frequency
+    N = len(sig_filt)
+    yf = np.abs(np.fft.rfft(sig_filt))
+    xf = np.fft.rfftfreq(N, 1/fs)
     
-    # 3. Time-Domain Peak Detection (More accurate for Dyspnea)
-    # distance=FS*1.2 ensures we don't count wiggles as breaths (min 1.2s between breaths)
-    peaks, _ = find_peaks(sig_norm, distance=FS*1.2, prominence=0.5)
-    bpm_peaks = (len(peaks) / (len(sig_norm)/FS)) * 60
+    # Find peak frequency in the range 0.1Hz to 1.0Hz
+    idx = np.where((xf >= 0.1) & (xf <= 1.0))[0]
+    peak_freq = xf[idx][np.argmax(yf[idx])]
     
-    # 4. FFT Calculation for Visualization
-    N = len(sig_norm)
-    yf = fft(sig_norm)
-    xf = fftfreq(N, 1/FS)
-    pos_mask = (xf > 0.05) & (xf < 1.5) # Focus on breathing range
-    xf_plot = xf[pos_mask]
-    yf_plot = np.abs(yf[pos_mask])
-    yf_norm = yf_plot / np.max(yf_plot)
-    
-    # Extract peak frequency for display
-    peak_freq = xf_plot[np.argmax(yf_norm)]
-    bpm_fft = peak_freq * 60
-    
-    time_axis = np.linspace(0, len(sig_norm)/FS, len(sig_norm))
-    
-    return time_axis, sig_norm, xf_plot, yf_norm, peak_freq, bpm_peaks, peaks
+    return peak_freq * 60
 
-# Process Data
-time_n, wave_n, xf_n, yf_n, freq_n, bpm_n, pks_n = get_respiratory_data(NORMAL_FILE)
-time_a, wave_a, xf_a, yf_a, freq_a, bpm_a, pks_a = get_respiratory_data(ABNORMAL_FILE)
+# ==========================================
+# 3. Main Loop & Statistics
+# ==========================================
+results = []
 
-# --- Plotting ---
-fig, axs = plt.subplots(2, 2, figsize=(14, 9))
+for met_bpm, filename in test_cases.items():
+    file_path = os.path.join(DATA_DIR, filename)
+    estimated_bpm = calculate_imu_bpm(file_path, FS)
+    results.append([met_bpm, estimated_bpm])
 
-# [0,0] Normal Time Domain + Peaks
-axs[0, 0].plot(time_n, wave_n, color='green', label='Signal')
-axs[0, 0].plot(time_n[pks_n], wave_n[pks_n], "x", color='black', label='Breaths')
-axs[0, 0].set_title(f"Normal (Eupnea) - Time Domain\nEstimated BPM: {bpm_n:.1f}")
-axs[0, 0].set_ylabel("Amplitude (Std Devs)")
-axs[0, 0].grid(True, alpha=0.3)
-axs[0, 0].legend(loc='upper right')
+# Convert to DataFrame
+df_results = pd.DataFrame(results, columns=['Metronome BPM (X)', 'IMU Estimated BPM (Y)'])
+df_results = df_results.dropna() # Remove missing files
 
-# [0,1] Abnormal Time Domain + Peaks
-axs[0, 1].plot(time_a, wave_a, color='red', label='Signal')
-axs[0, 1].plot(time_a[pks_a], wave_a[pks_a], "x", color='black', label='Breaths')
-axs[0, 1].set_title(f"Abnormal (Dyspnea) - Time Domain\nEstimated BPM: {bpm_a:.1f}")
-axs[0, 1].grid(True, alpha=0.3)
-axs[0, 1].legend(loc='upper right')
+# Calculate Pearson Correlation
+r_value, _ = pearsonr(df_results['Metronome BPM (X)'], df_results['IMU Estimated BPM (Y)'])
 
-# [1,0] Normal FFT
-axs[1, 0].plot(xf_n, yf_n, color='green')
-axs[1, 0].set_title("Normal FFT Spectrum")
-axs[1, 0].set_xlabel("Frequency (Hz)")
-axs[1, 0].set_xlim(0, 1.5)
-axs[1, 0].grid(True, alpha=0.3)
+# ==========================================
+# 4. Generate Result Table Image
+# ==========================================
+fig, ax = plt.subplots(figsize=(6, 8))
+ax.axis('off')
 
-# [1,1] Abnormal FFT
-axs[1, 1].plot(xf_a, yf_a, color='red')
-axs[1, 1].set_title("Abnormal FFT Spectrum")
-axs[1, 1].set_xlabel("Frequency (Hz)")
-axs[1, 1].set_xlim(0, 1.5)
-axs[1, 1].grid(True, alpha=0.3)
+# Prepare data for table
+table_data = []
+for _, row in df_results.iterrows():
+    table_data.append([int(row[0]), f"{row[1]:.2f}"])
 
-plt.tight_layout()
+# Add correlation row
+table_data.append(["Pearson Correla-\ntion coefficient (r)", f"{r_value:.10f}"])
+
+# Create Table
+table = ax.table(
+    cellText=table_data,
+    colLabels=df_results.columns,
+    cellLoc='center',
+    loc='center'
+)
+
+table.auto_set_font_size(False)
+table.set_fontsize(12)
+table.scale(1.2, 2.5) # Scale for better readability
+
+plt.title("IMU Accuracy Validation Result", pad=20, fontsize=14, fontweight='bold')
 plt.show()
+
+# Optional: Print to console
+print(df_results)
+print(f"\nPearson Correlation coefficient (r): {r_value:.10f}")

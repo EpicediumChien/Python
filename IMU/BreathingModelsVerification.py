@@ -86,13 +86,13 @@ def run_diagnostic():
         suggested_threshold = (avg_14bpm + avg_30bpm) / 2
         # --- 論文等級的門檻校準 ---
         if "LSTM" in model_name:
-            current_threshold = 0.30  # LSTM 的黃金分割點
+            current_threshold = 0.0367  # LSTM 的黃金分割點
         elif "CNN" in model_name:
-            current_threshold = 0.20  # CNN 勉強可以區分
+            current_threshold = 0.3555  # CNN 勉強可以區分
         else: # Transformer
-            current_threshold = 0.22  # Transformer 在此數據集上表現較差
+            current_threshold = 0.0892  # Transformer 在此數據集上表現較差
 
-        # print(f"\n>>> Suggested Threshold for {model_name}: {suggested_threshold:.4f}")
+        print(f"\n>>> Suggested Threshold for {model_name}: {suggested_threshold:.4f}")
         
         # --- 使用建議門檻產出混淆矩陣 ---
         y_true, y_pred = [], []
@@ -100,10 +100,10 @@ def run_diagnostic():
             for p in file_probs[file_name]:
                 y_true.append(truth_label)
                 # 如果機率大於建議門檻，判定為 Abnormal
-                y_pred.append("Abnormal" if p > current_threshold else "Normal")
+                y_pred.append("Abnormal" if p > suggested_threshold else "Normal")
 
         labels = ["Abnormal", "Normal"]
-        print(f"\n[{model_name}] Confusion Matrix (using {current_threshold:.4f}):")
+        print(f"\n[{model_name}] Confusion Matrix (using {suggested_threshold:.4f}):")
         print(pd.DataFrame(confusion_matrix(y_true, y_pred, labels=labels), 
                            index=[f"Act {l}" for l in labels], columns=[f"Pred {l}" for l in labels]))
 

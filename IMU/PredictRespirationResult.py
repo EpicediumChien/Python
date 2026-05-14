@@ -77,18 +77,35 @@ def get_bpm_robust(window_data, fs=20):
     idx = np.where((freqs >= 0.1) & (freqs <= 0.75))[0]
     return freqs[idx][np.argmax(fft_mag[idx])] * 60
 
-def clean_signal_logic(data, fs):
+def apply_agc_logic(sig, fs=20, window_sec=5):
+    window_size = int(fs * window_sec)
+    rolling_std = pd.Series(sig).rolling(window=window_size, center=True).std()
+    rolling_std = rolling_std.bfill().ffill().replace(0, 1e-6)
+    return sig / rolling_std.values
+
+def clean_signal_logic(data, fs=20):
     cleaned_data = np.zeros_like(data)
     nyq = 0.5 * fs
-    # 2nd order Butter for smoother phase response
-    b, a = signal.butter(2, [0.1/nyq, 0.75/nyq], btype='band')
+    
+    # 1. 你的原始濾波器 [0.08Hz - 0.85Hz]
+    b, a = signal.butter(2, [0.08/nyq, 0.85/nyq], btype='band')
+    
+    # 2. 你的原始平滑視窗 (1.1s)
+    savgol_win = 15 # 20Hz 下，Savgol 建議用 11 或 15 (約 0.5~0.7s)
     
     for i in range(data.shape[1]):
+        # A. 帶通濾波
         feat_filt = signal.filtfilt(b, a, data[:, i])
-        # Short window AGC (5s) is more responsive to breath peaks
-        rolling_std = pd.Series(feat_filt).rolling(window=int(fs*5), center=True).std()
-        feat_agc = feat_filt / rolling_std.bfill().ffill().replace(0, 1e-6).values
-        cleaned_data[:, i] = signal.savgol_filter(feat_agc, 11, 2)
+        
+        # B. 你的原始 AGC (10秒視窗)
+        feat_agc = apply_agc_logic(feat_filt, fs=fs, window_sec=10)
+        
+        # C. 你的原始 SavGol
+        try:
+            cleaned_data[:, i] = signal.savgol_filter(feat_agc, window_length=savgol_win, polyorder=2)
+        except:
+            cleaned_data[:, i] = feat_agc
+            
     return cleaned_data
 
 # ==========================================
