@@ -6,6 +6,8 @@ from scipy import signal
 from tensorflow.keras.models import load_model
 from sklearn.metrics import confusion_matrix, classification_report
 from layers_utils import PositionalEmbedding 
+import matplotlib.pyplot as plt # 新增繪圖引用
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 
 # --- 配置 ---
 BASE_DIR = "C:/Git/Python/IMU"
@@ -15,7 +17,9 @@ MODELS_TO_TEST = {
     "Trans": os.path.join(BASE_DIR, "models/respiration_CNNxTran_classifier.keras"),
     "LSTM": os.path.join(BASE_DIR, "models/respiration_CNNxLSTM_classifier.keras")
 }
+# "Slow Walk Verify"
 FILES_TO_VERIFY = {"14 BPM.csv": "Normal", "30 BPM - Straw.csv": "Abnormal"}
+# FILES_TO_VERIFY = {"Slow Walk Verify.csv": "Normal", "30 BPM - Straw.csv": "Abnormal"}
 FEATURES = ['accX', 'accY', 'accZ', 'gyroX', 'gyroY', 'gyroZ', 'roll', 'pitch', 'yaw']
 WINDOW_SIZE, STEP_SIZE, FS = 200, 10, 20
 
@@ -44,6 +48,9 @@ def clean_signal_logic(data, fs=20):
     return cleaned_data
 
 def run_diagnostic():
+    # 設置繪圖風格
+    plt.style.use('seaborn-v0_8-whitegrid')
+    
     for model_name, model_path in MODELS_TO_TEST.items():
         print(f"\n" + "="*70)
         print(f" DIAGNOSING MODEL: {model_name} ".center(70, '='))
@@ -53,6 +60,8 @@ def run_diagnostic():
         model = load_model(model_path, custom_objects={"PositionalEmbedding": PositionalEmbedding}, compile=False)
         
         file_probs = {}
+        all_y_true_binary = []  # 用於 ROC 的數值化標籤
+        all_y_scores = []       # 模型輸出的機率
 
         for file_name, truth_label in FILES_TO_VERIFY.items():
             path = os.path.join(DATA_PATH, file_name)
@@ -75,37 +84,56 @@ def run_diagnostic():
                 prob = float(model.predict(window_norm.reshape(1, 200, 11), verbose=0)[0][0])
                 probs.append(prob)
             
-            # --- 關鍵：執行平滑處理 (每 5 個視窗取平均) ---
+            # 執行平滑處理
             smoothed_probs = pd.Series(probs).rolling(window=5, center=True).mean().bfill().ffill().tolist()
             file_probs[file_name] = smoothed_probs
-            # print(f"File: {file_name:<18} | Avg Prob: {np.mean(probs):.4f} | Max: {np.max(probs):.4f} | Min: {np.min(probs):.4f}")
+            
+            # 收集用於 ROC 的數據
+            label_int = 1 if truth_label == "Abnormal" else 0
+            for p in smoothed_probs:
+                all_y_true_binary.append(label_int)
+                all_y_scores.append(p)
 
-        # --- 根據平均值找出建議的 Threshold ---
-        avg_14bpm = np.mean(file_probs["14 BPM.csv"])
-        avg_30bpm = np.mean(file_probs["30 BPM - Straw.csv"])
-        suggested_threshold = (avg_14bpm + avg_30bpm) / 2
-        # --- 論文等級的門檻校準 ---
-        if "LSTM" in model_name:
-            current_threshold = 0.0367  # LSTM 的黃金分割點
-        elif "CNN" in model_name:
-            current_threshold = 0.3555  # CNN 勉強可以區分
-        else: # Transformer
-            current_threshold = 0.0892  # Transformer 在此數據集上表現較差
+        # --- 門檻計算 ---
+        # avg_normal = np.mean(file_probs["Slow Walk Verify.csv"])
+        avg_normal = np.mean(file_probs["14 BPM.csv"])
+        avg_abnormal = np.mean(file_probs["30 BPM - Straw.csv"])
+        suggested_threshold = (avg_normal + avg_abnormal) / 2
 
         print(f"\n>>> Suggested Threshold for {model_name}: {suggested_threshold:.4f}")
         
-        # --- 使用建議門檻產出混淆矩陣 ---
-        y_true, y_pred = [], []
-        for file_name, truth_label in FILES_TO_VERIFY.items():
-            for p in file_probs[file_name]:
-                y_true.append(truth_label)
-                # 如果機率大於建議門檻，判定為 Abnormal
-                y_pred.append("Abnormal" if p > suggested_threshold else "Normal")
+        # --- 產出混淆矩陣 (基於建議門檻) ---
+        y_pred_labels = ["Abnormal" if p > suggested_threshold else "Normal" for p in all_y_scores]
+        y_true_labels = ["Abnormal" if i == 1 else "Normal" for i in all_y_true_binary]
 
         labels = ["Abnormal", "Normal"]
-        print(f"\n[{model_name}] Confusion Matrix (using {suggested_threshold:.4f}):")
-        print(pd.DataFrame(confusion_matrix(y_true, y_pred, labels=labels), 
-                           index=[f"Act {l}" for l in labels], columns=[f"Pred {l}" for l in labels]))
+        cm = confusion_matrix(y_true_labels, y_pred_labels, labels=labels)
+        print(f"\n[{model_name}] Confusion Matrix:")
+        print(pd.DataFrame(cm, index=[f"Act {l}" for l in labels], columns=[f"Pred {l}" for l in labels]))
+
+        # --- 繪製 ROC 曲線 ---
+        fpr, tpr, thresholds = roc_curve(all_y_true_binary, all_y_scores)
+        roc_auc = auc(fpr, tpr)
+
+        # 計算當前門檻在 ROC 圖上的位置
+        current_tpr = cm[0, 0] / (cm[0, 0] + cm[0, 1]) # TP / (TP + FN)
+        current_fpr = cm[1, 0] / (cm[1, 0] + cm[1, 1]) # FP / (FP + TN)
+
+        plt.figure(figsize=(7, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        
+        # 標註建議門檻點
+        plt.scatter(current_fpr, current_tpr, color='red', s=80, label=f'Suggested Threshold ({suggested_threshold:.4f})', zorder=5)
+        
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate (1 - Specificity)')
+        plt.ylabel('True Positive Rate (Sensitivity)')
+        plt.title(f'ROC Curve - {model_name}')
+        plt.legend(loc="lower right")
+        plt.grid(True, alpha=0.3)
+        plt.show() # 這會一個模型顯示一張圖，關閉圖表後會顯示下一個模型
 
 if __name__ == "__main__":
     run_diagnostic()

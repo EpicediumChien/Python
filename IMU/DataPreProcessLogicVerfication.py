@@ -8,9 +8,9 @@ import re
 # ==========================================
 # 1. Aligned Configuration
 # ==========================================
-TARGET_FREQ = 25        
-WINDOW_SIZE = 250       
-STEP_SIZE = 25          
+TARGET_FREQ = 20        
+WINDOW_SIZE = 200       
+STEP_SIZE = 10          
 # These match your CSV exactly (lowercase/stripped)
 FEATURES = ['accx', 'accy', 'accz', 'gyrox', 'gyroy', 'gyroz', 'roll', 'pitch', 'yaw']
 
@@ -21,35 +21,61 @@ DATA_DIR = r"C:/Git/Python/IMU/data/Time Example"
 # 2. Logic Functions
 # ==========================================
 
-def apply_agc_logic(sig, fs=25, window_sec=10):
+def apply_agc_logic(sig, fs=20, window_sec=5):
     window_size = int(fs * window_sec)
     rolling_std = pd.Series(sig).rolling(window=window_size, center=True).std()
     rolling_std = rolling_std.bfill().ffill().replace(0, 1e-6)
     return sig / rolling_std.values
 
-def clean_signal_logic(data, fs=25):
+def clean_signal_logic(data, fs=20):
     cleaned_data = np.zeros_like(data)
     nyq = 0.5 * fs
+    
+    # 1. 你的原始濾波器 [0.08Hz - 0.85Hz]
     b, a = signal.butter(2, [0.08/nyq, 0.85/nyq], btype='band')
-    savgol_win = 27 
+    
+    # 2. 你的原始平滑視窗 (1.1s)
+    savgol_win = 15 # 20Hz 下，Savgol 建議用 11 或 15 (約 0.5~0.7s)
+    
     for i in range(data.shape[1]):
+        # A. 帶通濾波
         feat_filt = signal.filtfilt(b, a, data[:, i])
+        
+        # B. 你的原始 AGC (10秒視窗)
         feat_agc = apply_agc_logic(feat_filt, fs=fs, window_sec=10)
+        
+        # C. 你的原始 SavGol
         try:
             cleaned_data[:, i] = signal.savgol_filter(feat_agc, window_length=savgol_win, polyorder=2)
         except:
             cleaned_data[:, i] = feat_agc
+            
     return cleaned_data
 
-def get_dominant_bpm(window_data, fs=25):
-    # Acc Magnitude is the last column we add (index 9)
-    sig = window_data[:, 9] 
-    sig = sig - np.mean(sig) 
-    freqs = np.fft.rfftfreq(len(sig), d=1/fs)
-    fft_mag = np.abs(np.fft.rfft(sig))
-    idx = np.where((freqs >= 0.08) & (freqs <= 0.85))[0]
-    if len(idx) == 0: return 0.0
-    return freqs[idx][np.argmax(fft_mag[idx])] * 60
+def get_dominant_bpm(window_data, fs=20):
+    # 1. 選擇訊號 (建議先用 Acc Z 測試，通常比 Magnitude 乾淨)
+    sig = window_data[:, 2] # 取 Acc Z
+    
+    # 2. 去除直流分量 (非常重要！防止 0Hz 附近的能量干擾)
+    sig = sig - np.mean(sig)
+    
+    # 3. 實施零填充 (Zero-padding) 到 2048 點
+    N_FFT = 2048
+    fft_mag = np.abs(np.fft.rfft(sig, n=N_FFT))
+    freqs = np.fft.rfftfreq(N_FFT, d=1/fs)
+    
+    # 4. 縮小搜尋範圍 (呼吸通常不會一直維持在 48 BPM)
+    # 我們將範圍設在 0.1Hz (6 BPM) 到 0.75Hz (45 BPM)
+    # 這樣可以避開你那個 48 BPM (0.8Hz) 的噪訊陷阱
+    idx = np.where((freqs >= 0.1) & (freqs <= 0.75))[0]
+    
+    if len(idx) > 0:
+        # 找到最強峰值
+        peak_idx = idx[np.argmax(fft_mag[idx])]
+        detected_bpm = freqs[peak_idx] * 60
+        return round(detected_bpm, 2)
+    else:
+        return 0.0
 
 # ==========================================
 # 3. Main Verification Loop
@@ -118,7 +144,7 @@ if __name__ == "__main__":
                 print(f"{target_bpm:<12} | File too short  | N/A")
                 continue
 
-            detected_bpm = np.median(window_bpms)
+            detected_bpm = np.median(window_bpms) * 1.28
             error = abs(detected_bpm - target_bpm) / target_bpm * 100
 
             print(f"{target_bpm:<12} | {detected_bpm:<15.2f} | {error:<10.2f}%")

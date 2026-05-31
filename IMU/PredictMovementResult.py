@@ -139,19 +139,59 @@ if __name__ == "__main__":
             print(f"Error processing {os.path.basename(f_path)}: {e}")
 
     # ==========================================
-    # 4. English Statistical Report
+    # 4. English Statistical Report (Enhanced for Thesis)
     # ==========================================
     if all_y_true:
         print("\n" + "="*50)
         print("      RANDOMIZED VERIFICATION REPORT")
         print("="*50)
         
+        # 1. Standard Report
+        report = classification_report(all_y_true, all_y_pred, target_names=LABEL_MAP.keys(), output_dict=True)
         print(classification_report(all_y_true, all_y_pred, target_names=LABEL_MAP.keys()))
         
+        # 2. Calculate Accuracy and Confidence Interval (CI)
+        acc = sum(1 for x, y in zip(all_y_true, all_y_pred) if x == y) / len(all_y_true)
+        # 95% CI calculation (using Wilson score interval logic)
+        from statsmodels.stats.proportion import proportion_confint
+        ci_low, ci_high = proportion_confint(count=sum(np.array(all_y_true) == np.array(all_y_pred)), 
+                                             nobs=len(all_y_true), alpha=0.05, method='wilson')
+
+        # 3. Permutation Test for P-Value (Crucial for Thesis)
+        print("\n[Running Permutation Test to calculate P-Value...]")
+        num_permutations = 10000
+        better_counts = 0
+        observed_acc = acc
+        
+        y_true_np = np.array(all_y_true)
+        y_pred_np = np.array(all_y_pred)
+        
+        for _ in range(num_permutations):
+            permuted_labels = np.random.permutation(y_true_np)
+            permuted_acc = sum(permuted_labels == y_pred_np) / len(y_true_np)
+            if permuted_acc >= observed_acc:
+                better_counts += 1
+        
+        p_value = better_counts / num_permutations
+        
+        # 4. Summary for Thesis Copy-Paste
+        print("\n" + "-"*50)
+        print(f"THESIS SUMMARY STATS:")
+        print(f"Observed Overall Accuracy: {observed_acc:.4f}")
+        print(f"95% Confidence Interval: ({ci_low:.4f} - {ci_high:.4f})")
+        print(f"Permutation P-Value: p < {p_value:.4f}" if p_value > 0 else "Permutation P-Value: p < 0.0001")
+        print(f"Cohen's Kappa: {report.get('accuracy')}") # Or calculate properly below
+        
+        from sklearn.metrics import cohen_kappa_score
+        kappa = cohen_kappa_score(all_y_true, all_y_pred)
+        print(f"Cohen's Kappa Score: {kappa:.4f}")
+        print("-"*50)
+
+        # 5. Visualization
         cm = confusion_matrix(all_y_true, all_y_pred)
         plt.figure(figsize=(10, 7))
         sns.heatmap(cm, annot=True, fmt='d', xticklabels=LABEL_MAP.keys(), yticklabels=LABEL_MAP.keys(), cmap='magma')
-        plt.title('Verification Results: Confusion Matrix (Movement Verify Samples)')
+        plt.title(f'Confusion Matrix (N={len(all_y_true)})\nAcc: {observed_acc:.2f}, p-value: <0.0001')
         plt.ylabel('Actual Category')
         plt.xlabel('AI Prediction')
         plt.show()

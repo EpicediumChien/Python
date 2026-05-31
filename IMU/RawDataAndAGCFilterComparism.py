@@ -62,22 +62,31 @@ def verify_straw_compare_sample(file_path):
     # 設定時間軸
     time_axis = np.arange(len(raw_magnitude)) / fs
     
-    # --- 3. 繪圖對比 ---
+    # --- 3. 繪圖對比 (修正版：顯示完整波形) ---
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
-    # 左側圖表：Raw Data (Zoomed for breathing)
-    axes[0].plot(time_axis, raw_magnitude, color='gray', linewidth=1)
+    # 左側圖表：Raw Data (自動調整範圍以顯示全貌)
+    axes[0].plot(time_axis, raw_magnitude, color='gray', linewidth=0.8, alpha=0.8)
+    
+    # 修正：不使用手動固定數值，改用動態範圍 (加一點 10% 的邊界緩衝)
+    y_min, y_max = np.min(raw_magnitude), np.max(raw_magnitude)
+    y_range = y_max - y_min
+    axes[0].set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range) 
+
     mag_mean = np.mean(raw_magnitude)
-    axes[0].set_ylim(mag_mean - 0.05, mag_mean + 0.05) # 縮小範圍顯示微波
-    axes[0].set_title(f"LEFT: Raw Data (Magnitude)\n[Zoomed at {mag_mean:.2f}g]", fontsize=14, color='green')
+    axes[0].set_title(f"LEFT: Raw Data (Magnitude)\n[Full Dynamic Range]", fontsize=14, color='green')
     axes[0].set_ylabel("Amplitude (g)")
     axes[0].set_xlabel("Time (seconds)")
     axes[0].grid(True, alpha=0.3)
-    axes[0].annotate('Breathing Micro-waves', xy=(time_axis[len(time_axis)//2], mag_mean), 
-                     xytext=(time_axis[len(time_axis)//2]+2, mag_mean+0.03),
-                     arrowprops=dict(facecolor='black', shrink=0.05, width=1))
 
-    # 右側圖表：Processed Data
+    # 調整標註位置，使其指向訊號中相對穩定的部分 (代表呼吸微波)
+    stable_idx = len(time_axis) // 2
+    axes[0].annotate('Breathing Micro-waves', 
+                     xy=(time_axis[stable_idx], raw_magnitude[stable_idx]), 
+                     xytext=(time_axis[stable_idx] + 5, y_max - 0.02 * y_range),
+                     arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=8))
+
+    # 右側圖表：Processed Data (保持原樣)
     axes[1].plot(time_axis, cleaned_signal, color='blue', linewidth=1.5)
     axes[1].set_title("RIGHT: Processed Data\n[Bandpass + AGC + SavGol]", fontsize=14, color='blue')
     axes[1].set_ylabel("Normalized Amplitude")
@@ -89,5 +98,5 @@ def verify_straw_compare_sample(file_path):
     plt.show()
 
 # --- 執行驗證 ---
-file_to_check = r"C:\Git\Python\IMU\data\StrawCompare\StaticSit_imu_YAHBOOM_20260320_002717.csv"
+file_to_check = r"C:\Git\Python\IMU\data\OldBreath\imu_log_20260124_165945.csv"
 verify_straw_compare_sample(file_to_check)
